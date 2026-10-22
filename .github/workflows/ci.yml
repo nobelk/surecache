@@ -131,7 +131,8 @@ jobs:
         run: |
           git worktree add "$RUNNER_TEMP/base" "origin/${{ github.base_ref }}"
           cd "$RUNNER_TEMP/base"
-          go test -run '^$' -bench . -benchmem -count 6 ./... | tee "$RUNNER_TEMP/base.txt"
+          # The base may predate the benchmarks (or the module); compare what exists.
+          { go test -run '^$' -bench . -benchmem -count 6 ./... || echo "base benchmarks unavailable"; } | tee "$RUNNER_TEMP/base.txt"
       - name: Compare
         run: |
           {
