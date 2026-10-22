@@ -61,6 +61,7 @@ type Store[ID comparable, E any] struct {
 	version uint64
 	touched map[ID]uint64
 
+	down          error // non-nil: every call fails with it
 	writeFaults   []WriteFault
 	loadOneFaults []ReadFault
 	loadAllFaults []ReadFault
@@ -124,6 +125,29 @@ func (s *Store[ID, E]) State() map[ID]E {
 	return out
 }
 
+// SetDown makes every LoadOne, LoadAll, Write and Ping fail at once with err, committing
+// nothing, until SetDown(nil).
+func (s *Store[ID, E]) SetDown(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.down = err
+}
+
+func (s *Store[ID, E]) downErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.down
+}
+
+// Ping is a health probe: ctx.Err() if ctx is done, the down error if the store is down,
+// otherwise nil.
+func (s *Store[ID, E]) Ping(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.downErr()
+}
+
 // Calls returns the call counters.
 func (s *Store[ID, E]) Calls() Calls {
 	return Calls{LoadOne: s.loadOne.Load(), LoadAll: s.loadAll.Load(), Write: s.writes.Load()}
@@ -135,6 +159,9 @@ func (s *Store[ID, E]) LoadOne(ctx context.Context, id ID) (E, error) {
 	s.checkProbe("LoadOne")
 	var zero E
 	if err := ctx.Err(); err != nil {
+		return zero, err
+	}
+	if err := s.downErr(); err != nil {
 		return zero, err
 	}
 	if f, ok := pop(&s.mu, &s.loadOneFaults); ok {
@@ -161,6 +188,9 @@ func (s *Store[ID, E]) NotFound(err error) bool {
 func (s *Store[ID, E]) LoadAll(ctx context.Context) ([]E, error) {
 	s.loadAll.Add(1)
 	s.checkProbe("LoadAll")
+	if err := s.downErr(); err != nil {
+		return nil, err
+	}
 	if f, ok := pop(&s.mu, &s.loadAllFaults); ok {
 		if err := applyReadFault(ctx, f); err != nil {
 			return nil, err
@@ -191,6 +221,9 @@ func (s *Store[ID, E]) LoadAll(ctx context.Context) ([]E, error) {
 func (s *Store[ID, E]) Write(ctx context.Context, fn func(tx *Tx[ID, E]) error) error {
 	s.writes.Add(1)
 	s.checkProbe("Write")
+	if err := s.downErr(); err != nil {
+		return err
+	}
 	fault, _ := pop(&s.mu, &s.writeFaults)
 	if err := s.fence.RLock(ctx); err != nil {
 		return err

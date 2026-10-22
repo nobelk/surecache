@@ -174,3 +174,38 @@ func TestReadFaults(t *testing.T) {
 		_, _ = s.LoadAll(ctx)
 	})
 }
+
+// A down store fails every call with the given error and commits nothing.
+func TestStore_Down(t *testing.T) {
+	s := newStore(0)
+	s.Seed(item{ID: "a"})
+	ctx := context.Background()
+	s.SetDown(ErrAmbiguous)
+	if _, err := s.LoadOne(ctx, "a"); err != ErrAmbiguous {
+		t.Fatalf("LoadOne = %v", err)
+	}
+	if _, err := s.LoadAll(ctx); err != ErrAmbiguous {
+		t.Fatalf("LoadAll = %v", err)
+	}
+	if err := s.Write(ctx, putX); err != ErrAmbiguous {
+		t.Fatalf("Write = %v", err)
+	}
+	if err := s.Ping(ctx); err != ErrAmbiguous {
+		t.Fatalf("Ping = %v", err)
+	}
+	if _, ok := s.Get("x"); ok {
+		t.Fatal("down store committed")
+	}
+	s.SetDown(nil)
+	if err := s.Ping(ctx); err != nil {
+		t.Fatalf("Ping = %v", err)
+	}
+	if err := s.Write(ctx, putX); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.Ping(cctx); err != context.Canceled {
+		t.Fatalf("Ping = %v", err)
+	}
+}

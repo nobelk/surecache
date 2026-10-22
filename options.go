@@ -20,12 +20,6 @@ const (
 // Option configures a cache at Build.
 type Option func(*config)
 
-// OutagePolicy decides how the cache behaves while the store is unavailable (design
-// section 8). It is sealed; there is no default, and Build requires one.
-type OutagePolicy interface {
-	outagePolicy()
-}
-
 type config struct {
 	outage          OutagePolicy
 	observer        Observer
@@ -54,6 +48,8 @@ func (cfg *config) validate() error {
 	var errs []error
 	if cfg.outage == nil {
 		errs = append(errs, ErrNoOutagePolicy)
+	} else {
+		errs = append(errs, cfg.outage.validate())
 	}
 	if cfg.tickContext == nil {
 		errs = append(errs, errors.New("surecache: WithTickContext(nil)"))

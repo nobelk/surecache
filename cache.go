@@ -38,6 +38,8 @@ type Cache[ID comparable, E any] struct {
 	generation uint64
 	refreshes  map[ID]*window
 	stateQueue []stateEvent
+	failStreak int  // consecutive health failures (outage policy)
+	okStreak   int  // consecutive probe successes (outage policy)
 	primed     bool // an earlier Prime returned Installed
 	running    bool // a Run is active
 

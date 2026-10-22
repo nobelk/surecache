@@ -15,7 +15,7 @@ import (
 func TestObserver_InitialStatePublished(t *testing.T) {
 	obs := &recorder{}
 	b := NewBuilder(groupSpec(10), Source[string, group](newGroupStore()))
-	if _, err := b.Build(WithOutagePolicy(testPolicy{}), WithObserver(obs)); err != nil {
+	if _, err := b.Build(WithOutagePolicy(ServeWhileExact()), WithObserver(obs)); err != nil {
 		t.Fatal(err)
 	}
 	if got := obs.take(); !slices.Equal(got, []string{"stale true false", "entities 0"}) {
@@ -69,7 +69,7 @@ func TestEmitter_DeliversInTransitionOrder(t *testing.T) {
 func TestEmitter_ReadFromCallbackAllowed(t *testing.T) {
 	obs := &reentrant{}
 	b := NewBuilder(groupSpec(10), Source[string, group](newGroupStore()))
-	c, err := b.Build(WithOutagePolicy(testPolicy{}), WithObserver(obs))
+	c, err := b.Build(WithOutagePolicy(ServeWhileExact()), WithObserver(obs))
 	if err != nil {
 		t.Fatal(err)
 	}

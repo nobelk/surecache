@@ -166,7 +166,7 @@ func TestLockedRegion_CallbackPanicLeavesStaleAndUnlocked(t *testing.T) {
 				}
 				return e.Members
 			}, 10)
-			c, err := b.Build(WithOutagePolicy(testPolicy{}))
+			c, err := b.Build(WithOutagePolicy(ServeWhileExact()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -211,7 +211,7 @@ func TestLockedRegion_RefreshCallbackPanic(t *testing.T) {
 			store := newGroupStore()
 			b := NewBuilder(spec, Source[string, group](store))
 			AddIndex(b, "member", func(e group) []string { trip("index keys"); return e.Members }, 10)
-			c, err := b.Build(WithOutagePolicy(testPolicy{}), WithCloneOnInstall())
+			c, err := b.Build(WithOutagePolicy(ServeWhileExact()), WithCloneOnInstall())
 			if err != nil {
 				t.Fatal(err)
 			}

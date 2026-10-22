@@ -51,9 +51,6 @@ func (c *Cache[ID, E]) Run(ctx context.Context) error {
 	}
 }
 
-// startProber starts the outage policy's health prober, if it has one.
-func (c *Cache[ID, E]) startProber(context.Context, *sync.WaitGroup) {}
-
 // tick runs one loop iteration. The deferred closure recovers a panic from any part of
 // it: the tick-context hook, the store, or a callback. A panic inside a locked region
 // has already marked the cache stale and released the lock; any other panic is marked

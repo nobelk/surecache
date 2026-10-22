@@ -61,7 +61,7 @@ func TestBuild_Validation(t *testing.T) {
 			}
 			opts := tc.opts
 			if !tc.noPol {
-				opts = append([]Option{WithOutagePolicy(testPolicy{})}, opts...)
+				opts = append([]Option{WithOutagePolicy(ServeWhileExact())}, opts...)
 			}
 			c, err := b.Build(opts...)
 			if err == nil || c != nil {
@@ -95,17 +95,17 @@ func TestBuild_ReportsEveryErrorAtOnce(t *testing.T) {
 
 func TestBuild_Twice(t *testing.T) {
 	b := NewBuilder(groupSpec(10), Source[string, group](newGroupStore()))
-	if _, err := b.Build(WithOutagePolicy(testPolicy{})); err != nil {
+	if _, err := b.Build(WithOutagePolicy(ServeWhileExact())); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := b.Build(WithOutagePolicy(testPolicy{})); err == nil {
+	if _, err := b.Build(WithOutagePolicy(ServeWhileExact())); err == nil {
 		t.Fatal("second Build must fail")
 	}
 }
 
 func TestAddIndex_AfterBuildPanics(t *testing.T) {
 	b := NewBuilder(groupSpec(10), Source[string, group](newGroupStore()))
-	if _, err := b.Build(WithOutagePolicy(testPolicy{})); err != nil {
+	if _, err := b.Build(WithOutagePolicy(ServeWhileExact())); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -119,7 +119,7 @@ func TestAddIndex_AfterBuildPanics(t *testing.T) {
 func TestBuild_OptionsApplied(t *testing.T) {
 	tick := func(ctx context.Context) context.Context { return ctx }
 	b := NewBuilder(groupSpec(10), Source[string, group](newGroupStore()))
-	c, err := b.Build(nil, WithOutagePolicy(testPolicy{}), WithObserver(nil), WithLogger(nil),
+	c, err := b.Build(nil, WithOutagePolicy(ServeWhileExact()), WithObserver(nil), WithLogger(nil),
 		WithTickContext(tick), WithPrimeBudget(time.Second), WithRebuildBudget(2*time.Second),
 		WithRefreshBudget(3*time.Second), WithRebuildInterval(4*time.Second), WithCloneOnInstall())
 	if err != nil {

@@ -58,11 +58,6 @@ func newGroupStore() *memstore.Store[string, group] {
 	})
 }
 
-// testPolicy is an outage policy for tests that do not exercise one.
-type testPolicy struct{}
-
-func (testPolicy) outagePolicy() {}
-
 // recorder is an Observer that records every event as a string.
 type recorder struct {
 	NopObserver
@@ -115,6 +110,7 @@ type fixtureConfig struct {
 	capacity, memberCap, ownerCap int
 	opts                          []Option
 	source                        func(*memstore.Store[string, group]) Source[string, group]
+	policy                        func() OutagePolicy
 	noProbe                       bool
 }
 
@@ -131,6 +127,12 @@ func withOptions(opts ...Option) fixtureOpt {
 // withSource wraps the memstore in a custom Source.
 func withSource(wrap func(*memstore.Store[string, group]) Source[string, group]) fixtureOpt {
 	return func(c *fixtureConfig) { c.source = wrap }
+}
+
+// withPolicy sets the outage policy; the default is ServeWhileExact. It is a function so
+// the policy can close over the fixture's store.
+func withPolicy(p func() OutagePolicy) fixtureOpt {
+	return func(c *fixtureConfig) { c.policy = p }
 }
 
 // concurrent disables the lock probe, for tests where several goroutines use the cache
@@ -154,7 +156,11 @@ func newFixture(t testing.TB, opts ...fixtureOpt) *fixture {
 	b := NewBuilder(groupSpec(cfg.capacity), src)
 	f.byMember = AddIndex(b, "member", groupMembers, cfg.memberCap)
 	f.byOwner = AddIndex(b, "owner", groupOwner, cfg.ownerCap)
-	all := append([]Option{WithOutagePolicy(testPolicy{}), WithObserver(f.obs)}, cfg.opts...)
+	policy := ServeWhileExact()
+	if cfg.policy != nil {
+		policy = cfg.policy()
+	}
+	all := append([]Option{WithOutagePolicy(policy), WithObserver(f.obs)}, cfg.opts...)
 	c, err := b.Build(all...)
 	if err != nil {
 		t.Fatalf("Build: %v", err)

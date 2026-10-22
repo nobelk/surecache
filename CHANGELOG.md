@@ -24,3 +24,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 - `Prime` with the prime budget and the `ErrAlreadyPrimed` rule, the fenced rebuild with
   generation capture, discard and refresh-window bumping on install, and the background
   `Run` loop with the rebuild budget, the per-tick context hook and panic recovery.
+- Outage policies `ServeWhileExact` and `DistrustAfterProbeFailures` with `HealthPolicy`
+  validation, the `unhealthy` read gate, the health prober driven by `Run`, and
+  `ObserveStoreResult` for deferred-read failures.

@@ -201,7 +201,7 @@ func TestRun_SurvivesCallbackPanic(t *testing.T) {
 		store := newGroupStore()
 		store.Seed(g("a", ""))
 		obs := &recorder{}
-		c, err := NewBuilder(spec, Source[string, group](store)).Build(WithOutagePolicy(testPolicy{}), WithObserver(obs))
+		c, err := NewBuilder(spec, Source[string, group](store)).Build(WithOutagePolicy(ServeWhileExact()), WithObserver(obs))
 		if err != nil {
 			t.Fatal(err)
 		}
