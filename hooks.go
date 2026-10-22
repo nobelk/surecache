@@ -19,6 +19,8 @@ type hooks struct {
 	beforeLoadOne func(id any)
 	// afterLoadOne runs between LoadOne and the install lock.
 	afterLoadOne func(id any)
+	// afterLoadAll runs between LoadAll and the install lock.
+	afterLoadAll func()
 	// beforeDrain runs before a caller delivers queued state events.
 	beforeDrain func()
 }

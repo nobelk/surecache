@@ -38,6 +38,8 @@ type Cache[ID comparable, E any] struct {
 	generation uint64
 	refreshes  map[ID]*window
 	stateQueue []stateEvent
+	primed     bool // an earlier Prime returned Installed
+	running    bool // a Run is active
 
 	// emitMu admits one deliverer of state events at a time (see drain).
 	emitMu sync.Mutex
