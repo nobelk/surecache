@@ -12,6 +12,10 @@ updates:
     directory: /promobs
     schedule:
       interval: weekly
+  - package-ecosystem: gomod
+    directory: /examples/groups
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:

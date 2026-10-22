@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: [., surecachepg, promobs]
+        module: [., surecachepg, promobs, examples/groups]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -49,6 +49,8 @@ jobs:
         run: make deps-check
       - name: Test
         run: make test
+      - name: Allocation tests (no race detector)
+        run: make alloc
 
   cover:
     runs-on: ubuntu-latest
@@ -90,11 +92,14 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
-      - name: Test surecachepg
-        working-directory: surecachepg
-        run: go test -race -json ./... | tee test.json | jq -j 'select(.Action == "output") | .Output'
+      - name: Test surecachepg and the PostgreSQL example
+        run: |
+          status=0
+          (cd surecachepg && go test -race -json ./...) > test.json || status=1
+          (cd examples/groups && go test -race -json ./...) >> test.json || status=1
+          jq -j 'select(.Action == "output") | .Output' test.json
+          exit "$status"
       - name: Fail on skipped tests
-        working-directory: surecachepg
         run: |
           skipped="$(jq -r 'select(.Action == "skip" and .Test != null) | "\(.Package) \(.Test)"' test.json)"
           if [ -n "$skipped" ]; then
