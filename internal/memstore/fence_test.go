@@ -33,8 +33,8 @@ func TestFence_ExclusiveWaitsForShared(t *testing.T) {
 		go func() { got <- f.Lock(ctx) }()
 		synctest.Wait()
 		select {
-		case <-got:
-			t.Fatal("exclusive granted while shared held")
+		case err := <-got:
+			t.Fatalf("exclusive granted while shared held: %v", err)
 		default:
 		}
 		f.RUnlock()
@@ -57,8 +57,8 @@ func TestFence_WaitingExclusiveBlocksNewShared(t *testing.T) {
 		go func() { shared <- f.RLock(ctx) }()
 		synctest.Wait()
 		select {
-		case <-shared:
-			t.Fatal("new shared holder overtook a waiting exclusive")
+		case err := <-shared:
+			t.Fatalf("new shared holder overtook a waiting exclusive: %v", err)
 		default:
 		}
 		f.RUnlock()
