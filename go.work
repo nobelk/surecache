@@ -2,11 +2,16 @@ go 1.25
 
 use (
 	.
+	./examples/groups
 	./promobs
 	./surecachepg
 )
 
-// The nested modules require the root module at the placeholder v0.0.0 until the first
+// The nested modules require each other at the placeholder v0.0.0 until the first
 // release (milestone 11). This workspace-only replace resolves it to the local tree;
 // the modules' own go.mod files carry no replace directives.
-replace github.com/nobelk/surecache v0.0.0 => ./
+replace (
+	github.com/nobelk/surecache v0.0.0 => ./
+	github.com/nobelk/surecache/promobs v0.0.0 => ./promobs
+	github.com/nobelk/surecache/surecachepg v0.0.0 => ./surecachepg
+)

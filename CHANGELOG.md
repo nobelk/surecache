@@ -30,3 +30,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 - Edge-triggered `slog` logs `surecache_stale`, `surecache_rebuild_failed` and
   `surecache_recovered`, delivered off the lock and in transition order with the
   caller's or the tick's context, plus an audit of every observer signal.
+- A randomized model-based concurrency checker that verifies every answer against the
+  store's commit log and the required deferrals inside mutation windows, fuzz targets
+  for the bulk-install contract and refresh sequences, benchmarks with allocation gates,
+  mutation testing with `gremlins`, and enforcing coverage and mutation gates.
+- `surecachetest`, the exported store conformance suite, with a self-test that proves
+  each check fails against a store that breaks its rule.
+- `surecachepg`, the PostgreSQL (pgx v5) primitives: the advisory-lock fence, the fenced
+  snapshot reader with a counted single-statement querier, connection bounds,
+  `CheckBudgets` and `IsNothingCommitted`, proven by the conformance suite, an
+  abandoned-commit test and the outage and restart recipes against PostgreSQL 17 and 18.
+- `promobs`, the Prometheus observer with pre-registered collectors and closed label
+  sets.
+- Godoc examples, the `examples/groups` PostgreSQL decorator module, complete package
+  documentation, the README and the operations runbook.
