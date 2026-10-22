@@ -27,3 +27,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 - Outage policies `ServeWhileExact` and `DistrustAfterProbeFailures` with `HealthPolicy`
   validation, the `unhealthy` read gate, the health prober driven by `Run`, and
   `ObserveStoreResult` for deferred-read failures.
+- Edge-triggered `slog` logs `surecache_stale`, `surecache_rebuild_failed` and
+  `surecache_recovered`, delivered off the lock and in transition order with the
+  caller's or the tick's context, plus an audit of every observer signal.

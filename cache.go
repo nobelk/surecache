@@ -38,8 +38,9 @@ type Cache[ID comparable, E any] struct {
 	generation uint64
 	refreshes  map[ID]*window
 	stateQueue []stateEvent
-	failStreak int  // consecutive health failures (outage policy)
-	okStreak   int  // consecutive probe successes (outage policy)
+	failStreak int // consecutive health failures (outage policy)
+	okStreak   int // consecutive probe successes (outage policy)
+	episode    episode
 	primed     bool // an earlier Prime returned Installed
 	running    bool // a Run is active
 
@@ -70,6 +71,7 @@ func (c *Cache[ID, E]) markStaleLocked(ctx context.Context, cause error) {
 		return
 	}
 	c.stale = true
+	c.beginEpisodeLocked()
 	c.queueStateLocked(stateEvent{ctx: ctx, kind: stateStale, on: true, cause: cause})
 }
 

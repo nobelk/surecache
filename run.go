@@ -57,9 +57,15 @@ func (c *Cache[ID, E]) Run(ctx context.Context) error {
 // stale here, so the cache never stays trusted across an unexplained failure.
 func (c *Cache[ID, E]) tick(ctx context.Context) {
 	tickCtx := ctx
+	rebuilding := false
+	result, err := Failed, error(nil)
 	defer func() {
 		if r := recover(); r != nil {
-			c.markStale(tickCtx, fmt.Errorf("%w: %v", errPanicked, r))
+			err = fmt.Errorf("%w: %v", errPanicked, r)
+			c.markStale(tickCtx, err)
+		}
+		if rebuilding && result == Failed {
+			c.noteLoopFailure(tickCtx, err)
 		}
 	}()
 	tickCtx = c.cfg.tickContext(ctx)
@@ -71,9 +77,11 @@ func (c *Cache[ID, E]) tick(ctx context.Context) {
 	}
 	c.generation++
 	captured := c.generation
+	c.episode.attempts++
 	c.mu.Unlock()
 
 	rctx, cancel := context.WithTimeout(tickCtx, c.cfg.rebuildBudget)
 	defer cancel()
-	_, _ = c.rebuild(rctx, captured, TriggerLoop)
+	rebuilding = true
+	result, err = c.rebuild(rctx, captured, TriggerLoop)
 }

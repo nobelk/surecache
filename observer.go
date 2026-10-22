@@ -5,6 +5,7 @@ package surecache
 import (
 	"context"
 	"strconv"
+	"time"
 )
 
 // Observer receives the cache's signals (design section 9). The cache calls every method
@@ -195,8 +196,14 @@ type stateEvent struct {
 	cause   error
 	kind    stateKind
 	on      bool
-	initial bool
+	initial bool // Build's initial state: published, not logged
 	n       int
+
+	// recovered marks the stale-to-trusted transition that ends a stale episode;
+	// attempts and staleFor feed surecache_recovered.
+	recovered bool
+	attempts  int
+	staleFor  time.Duration
 }
 
 // queueStateLocked appends a state event. The caller holds c.mu for writing.
@@ -251,6 +258,7 @@ func (c *Cache[ID, E]) drain() {
 }
 
 func (c *Cache[ID, E]) deliverState(ev stateEvent) {
+	c.logState(ev)
 	switch ev.kind {
 	case stateStale:
 		c.cfg.observer.StaleChanged(ev.on, ev.cause)

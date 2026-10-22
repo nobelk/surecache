@@ -76,7 +76,11 @@ func (c *Cache[ID, E]) installSnapshotLocked(ctx context.Context, s *snapshot[ID
 	}
 	if c.stale {
 		c.stale = false
-		c.queueStateLocked(stateEvent{ctx: ctx, kind: stateStale, on: false})
+		attempts, staleFor, recovered := c.endEpisodeLocked()
+		c.queueStateLocked(stateEvent{
+			ctx: ctx, kind: stateStale, on: false,
+			recovered: recovered, attempts: attempts, staleFor: staleFor,
+		})
 	}
 	c.queueStateLocked(stateEvent{ctx: ctx, kind: stateEntities, n: s.entities.Len()})
 }
