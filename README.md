@@ -14,6 +14,30 @@ correctness first, availability through outages second, speed third.
 
 > **Status: pre-1.0.** The API may change before v1.0.0.
 
+## Use case
+
+One process owns a bounded set of groups and their members. A sweep asks, several times
+a second, which group a member belongs to before it acts. A person occasionally adds or
+moves a member. A stale membership, or a false "not a member," takes the wrong action:
+a safety step skipped, a record dropped, an authorization granted to the wrong group.
+
+A TTL cache can do that. It may still serve the pre-write membership after the write has
+returned, and a failed refresh can keep the last value because the store is down.
+`surecache` answers from memory only while it can prove the answer matches committed
+state:
+
+- `Found` is the current entity. `Absent`, from a secondary-index lookup, means the
+  member is in no group. Either may drive the action.
+- `Defer` means "ask the store." It is never "not a member." Map it to a store call.
+
+Writes stay on the store, through `Mutate` or `Create`, and name every entity they can
+change. A move between two groups names both. With `ServeWhileExact`, trusted reads keep
+succeeding while the database is down, until a write whose outcome is unknown makes the
+whole cache stale. Then every read defers until a fenced rebuild restores trust.
+
+The same story, as a PostgreSQL repository decorator, is
+[examples/groups](examples/groups). The quick start below is the in-memory version.
+
 ## Guarantees
 
 In plain words (the precise statements are in [docs/design.md](docs/design.md), section 3.1):
@@ -39,8 +63,7 @@ In plain words (the precise statements are in [docs/design.md](docs/design.md), 
 - Reads vastly outnumber writes.
 - The working set is bounded and fits in memory.
 - One process is the only writer of the cached data.
-- A stale or missing answer has real cost: a safety action skipped, data silently
-  dropped, an authorization granted wrongly.
+- A stale or missing answer has real cost, as in the membership sweep above.
 
 ## When not to use it
 
@@ -75,6 +98,7 @@ b := surecache.NewBuilder(surecache.Spec[string, Group]{
 	},
 }, surecache.Source[string, Group](store))
 byMember := surecache.AddIndex(b, "member", func(g Group) []string { return g.Members }, 10_000)
+// ServeWhileExact: keep answering trusted reads while the store is down.
 cache, err := b.Build(surecache.WithOutagePolicy(surecache.ServeWhileExact()))
 if err != nil {
 	return err
@@ -86,20 +110,30 @@ if r, err := cache.Prime(ctx); r != surecache.Installed {
 }
 go func() { _ = cache.Run(ctx) }() // the single background rebuilder
 
-// Reads: Defer means "ask the store", never "absent".
+// Found may drive the action. Anything else asks the store; it is not "no such group".
 if g, a := cache.Get("red"); a == surecache.Found {
 	fmt.Println("red:", g.Members)
 }
 
 // Writes: name every entity the write can change.
 err = cache.Mutate(ctx, []string{"blue"}, func() error { return store.AddMember("blue", "bob") })
-id, a, _ := surecache.Lookup(cache, byMember, "bob")
-fmt.Println("bob is in:", id, a)
+
+// Absent is authoritative ("bob is in no group"). Defer asks the store, always.
+id, a, err := surecache.Lookup(cache, byMember, "bob")
+switch {
+case err != nil || a == surecache.Defer:
+	id, _, err = store.GroupOf("bob") // ask the store; never treat Defer as absent
+case a == surecache.Absent:
+	// trusted negative: do not act as if bob were in a group
+default:
+	fmt.Println("bob is in:", id)
+}
 ```
 
-The full, runnable version is `Example` in [example_test.go](example_test.go). For a
-PostgreSQL service with a cached repository decorator, Prometheus metrics and graceful
-shutdown, see [examples/groups](examples/groups).
+The runnable versions are `Example` and `ExampleLookup` in
+[example_test.go](example_test.go). For a PostgreSQL service with a cached repository
+decorator, Prometheus metrics and graceful shutdown, see
+[examples/groups](examples/groups).
 
 ## Documentation
 
