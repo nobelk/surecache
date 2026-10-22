@@ -440,8 +440,9 @@ refreshBatch(ctx, ids):
       if stale: unlock; return          # FUN-4
       for id in ids:                    # open every window before any read
           captured[id] = beginRefreshLocked(id)   # window.gen++, window.active++
+          pending[id]++                 # the batch holds the entity (plan clarification 14)
     unlock
-    defer for id in ids: endRefresh(id) # active--, delete window at 0
+    defer for id in ids: endRefresh(id) # active--, pending--, delete each at 0
 
     for id in ids:
         refreshOne(ctx, id, captured[id])
@@ -852,6 +853,8 @@ Rules for the decorator:
 2. `generation++` on every refresh start, mark-stale and rebuild capture.
 3. `inFlight++` exactly once per mutation, creates included; pending and in-flight marks
    released only after settle completes, including on panic (which marks stale first).
+   Every refresh batch marks its ids pending while its windows are open, so an entity
+   whose older refresh was discarded defers until the newer batch installs.
 4. Every index removal compares the current holder before deleting, and every index
    insertion that would overwrite another entity's entry is allowed only while that
    entity has a refresh in progress; otherwise the cache goes stale with the maps

@@ -1,0 +1,28 @@
+# Mutation testing for the root module (D8): `make mutate`, nightly and on demand.
+# Efficacy = killed / (killed + lived) must stay at or above 90%.
+#
+# Excluded: the reference model and history checker, the coverage script, and the
+# in-memory test store; they are test infrastructure, not the library.
+#
+# Equivalent mutants (cannot be killed; each reviewed by hand) are listed at the end of
+# this file with a one-line reason. Reviewers reject an entry without a reason.
+unleash:
+  threshold:
+    efficacy: 90
+  exclude-files:
+    - "^internal/model/"
+    - "^internal/memstore/"
+    - "^scripts/"
+  timeout-coefficient: 10
+
+# Equivalent mutants:
+#   mutate.go `len(ids) <= 8` (boundary, negation): both dedupe paths return the same
+#     ids in the same order; the threshold only picks the faster one.
+#   rebuild.go Prime `c.generation++` to `--`: the capture is still a value no live
+#     capture holds, since Prime is refused once primed, ticks never overlap, and every
+#     other change increments.
+#   run.go tick `c.generation++` to `--`: same reason as Prime.
+#   refresh.go endRefresh `c.pending[id] <= 0` (boundary): the count never drops below
+#     zero, since every decrement pairs with an increment, so `<= 0` and `< 1` agree.
+#   surecachetest/suite.go timing arithmetic and fence-wait retry conditions: the
+#     real-time windows have slack by design; mutating them changes timing, not verdicts.

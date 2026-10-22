@@ -80,7 +80,7 @@ type SnapshotQuerier interface {
 
 Each call counts as one statement; the call past `MaxReadStatements` fails without
 reaching the server. Every call forces the extended protocol
-(`pgx.QueryExecModeCacheDescribe` prepended to the arguments), so one call cannot carry
+(`pgx.QueryExecModeDescribeExec` prepended to the arguments; unlike the cache-describe mode it works with any pool, including one whose description cache is disabled), so one call cannot carry
 several statements, and an argument that selects another exec mode is rejected. There is
 no batch or connection access.
 

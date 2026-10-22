@@ -1,0 +1,7 @@
+mode: atomic
+github.com/nobelk/surecache/read.go:10.2,12.3 2 1
+github.com/nobelk/surecache/read.go:14.2,15.3 2 4
+github.com/nobelk/surecache/mutate.go:5.2,7.3 3 1
+github.com/nobelk/surecache/mutate.go:9.2,9.10 1 0
+github.com/nobelk/surecache/internal/x/read.go:1.1,2.2 2 0
+github.com/nobelk/surecache/read.go:10.2,12.3 2 0
