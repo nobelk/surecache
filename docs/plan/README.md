@@ -116,6 +116,14 @@ These refine the design document. Where they conflict with it, this list wins.
     snapshot transaction. `surecachepg` bounds the read as `ReadStatementTimeout ×
     MaxReadStatements`, and the snapshot callback gets a restricted, counted,
     single-statement query interface instead of a `pgx.Tx` (milestone 09).
+14. **A refresh batch holds its ids pending.** Found by the model checker in milestone
+    07. A refresh that a newer same-entity window discards leaves the entity to the
+    newer batch, and its mutation then releases its marks. Section 6.3 assumed the
+    newer batch's mutation still marks the entity, but a `Create` marks no id, since
+    its id is unknown until `op` returns. A delete of X whose refresh is discarded by a
+    re-create of X would then serve the deleted X until the create's refresh installs.
+    `refreshBatch` therefore marks every id pending when it opens the windows and
+    releases the marks in `endRefresh` (test `TestCreate_RefreshHoldsMarkWhileItOwnsTheWindow`).
 
 ## Repository layout (target for v0.1.0)
 

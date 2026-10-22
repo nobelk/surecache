@@ -9,8 +9,10 @@ package memstore
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Nothing-committed errors. Each is returned only when the store committed nothing.
@@ -27,6 +29,10 @@ var (
 // configured capacity.
 var ErrOverCapacity = errors.New("memstore: over capacity")
 
+// ErrFenceTimeout is returned by LoadAll when the exclusive fence is not granted within
+// Config.FenceWait.
+var ErrFenceTimeout = errors.New("memstore: fence wait timed out")
+
 // CommittedNothing is the classifier for surecache.Spec.CommittedNothing: true only for
 // the declared nothing-committed errors. Context and other errors are ambiguous.
 func CommittedNothing(err error) bool {
@@ -42,6 +48,15 @@ type Config[ID comparable, E any] struct {
 	// Capacity makes LoadAll refuse when more cacheable entities exist. Zero means no
 	// limit.
 	Capacity int
+	// FenceWait bounds LoadAll's wait for the exclusive fence. Zero means no bound.
+	FenceWait time.Duration
+	// Join, when set, stores each entity as two parts read by two statements: LoadOne
+	// and LoadAll read the head part, call the read pause, then read the tail part, and
+	// return Join(head, tail). The pause lets a test commit between the statements.
+	Join func(head, tail E) E
+	// MixedSnapshot breaks the two-part read on purpose: the second statement reads
+	// fresh state instead of the first statement's snapshot.
+	MixedSnapshot bool
 }
 
 // Calls counts store calls per method.
@@ -60,6 +75,9 @@ type Store[ID comparable, E any] struct {
 	// that changed each id, so a transaction can detect a concurrent change at commit.
 	version uint64
 	touched map[ID]uint64
+	// history is the commit log, recorded after RecordHistory.
+	recording bool
+	history   []Commit[ID, E]
 
 	down          error // non-nil: every call fails with it
 	writeFaults   []WriteFault
@@ -70,6 +88,7 @@ type Store[ID comparable, E any] struct {
 
 	probe  func() bool
 	report func(string)
+	pause  func()
 }
 
 // New returns an empty store.
@@ -91,16 +110,37 @@ func (s *Store[ID, E]) checkProbe(method string) {
 	}
 }
 
+// SetReadPause installs a function called between the two statements of a two-part
+// LoadOne or LoadAll (Config.Join). Set it before the store is used concurrently.
+func (s *Store[ID, E]) SetReadPause(pause func()) {
+	s.pause = pause
+}
+
+// readTail runs the second statement of a two-part read: it pauses, then returns the
+// tail state, from the first statement's snapshot unless MixedSnapshot.
+func (s *Store[ID, E]) readTail(snapshot map[ID]E) map[ID]E {
+	if s.pause != nil {
+		s.pause()
+	}
+	if s.cfg.MixedSnapshot {
+		return s.State()
+	}
+	return snapshot
+}
+
 // Seed writes entities directly, without the fence. Use it for test setup only.
 func (s *Store[ID, E]) Seed(es ...E) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.version++
+	puts := make([]E, 0, len(es))
 	for _, e := range es {
 		id := s.cfg.Key(e)
 		s.data[id] = s.cfg.Clone(e)
 		s.touched[id] = s.version
+		puts = append(puts, s.cfg.Clone(e))
 	}
+	s.recordLocked(puts, nil)
 }
 
 // Get returns a copy of id's committed state, without counting a call.
@@ -148,6 +188,46 @@ func (s *Store[ID, E]) Ping(ctx context.Context) error {
 	return s.downErr()
 }
 
+// Commit is one recorded transaction: the version it produced and its changes.
+type Commit[ID comparable, E any] struct {
+	Version uint64
+	Puts    []E
+	Dels    []ID
+}
+
+// Version returns the commit counter. Every commit increments it while holding the store
+// mutex, so it is a linearization point for commits.
+func (s *Store[ID, E]) Version() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.version
+}
+
+// RecordHistory starts the commit log and returns the current state and version as its
+// base.
+func (s *Store[ID, E]) RecordHistory() (base []E, version uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recording = true
+	for _, e := range s.data {
+		base = append(base, s.cfg.Clone(e))
+	}
+	return base, s.version
+}
+
+// History returns the commit log recorded since RecordHistory.
+func (s *Store[ID, E]) History() []Commit[ID, E] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.history)
+}
+
+func (s *Store[ID, E]) recordLocked(puts []E, dels []ID) {
+	if s.recording {
+		s.history = append(s.history, Commit[ID, E]{Version: s.version, Puts: puts, Dels: dels})
+	}
+}
+
 // Calls returns the call counters.
 func (s *Store[ID, E]) Calls() Calls {
 	return Calls{LoadOne: s.loadOne.Load(), LoadAll: s.loadAll.Load(), Write: s.writes.Load()}
@@ -173,6 +253,13 @@ func (s *Store[ID, E]) LoadOne(ctx context.Context, id ID) (E, error) {
 	if !ok {
 		return zero, ErrNotFound
 	}
+	if s.cfg.Join != nil {
+		tail, ok := s.readTail(map[ID]E{id: e})[id]
+		if !ok {
+			return zero, ErrNotFound
+		}
+		e = s.cfg.Join(e, tail)
+	}
 	return e, nil
 }
 
@@ -196,22 +283,47 @@ func (s *Store[ID, E]) LoadAll(ctx context.Context) ([]E, error) {
 			return nil, err
 		}
 	}
-	if err := s.fence.Lock(ctx); err != nil {
+	if err := s.acquireExclusive(ctx); err != nil {
 		return nil, err
 	}
 	s.fence.Unlock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	state := s.State()
+	tails := state
+	if s.cfg.Join != nil {
+		tails = s.readTail(state)
+	}
 	var out []E
-	for _, e := range s.data {
+	for id, e := range state {
+		tail, ok := tails[id]
+		if !ok {
+			continue // deleted between the statements of a mixed read
+		}
+		if s.cfg.Join != nil {
+			e = s.cfg.Join(e, tail)
+		}
 		if s.cfg.Cacheable(e) {
-			out = append(out, s.cfg.Clone(e))
+			out = append(out, e)
 		}
 	}
 	if s.cfg.Capacity > 0 && len(out) > s.cfg.Capacity {
 		return nil, ErrOverCapacity
 	}
 	return out, nil
+}
+
+// acquireExclusive takes the fence exclusively within Config.FenceWait. A bound that
+// expires returns ErrFenceTimeout; the caller's own context error is returned unwrapped.
+func (s *Store[ID, E]) acquireExclusive(ctx context.Context) error {
+	if s.cfg.FenceWait <= 0 {
+		return s.fence.Lock(ctx)
+	}
+	fctx, cancel := context.WithTimeout(ctx, s.cfg.FenceWait)
+	defer cancel()
+	err := s.fence.Lock(fctx)
+	if err != nil && ctx.Err() == nil {
+		return ErrFenceTimeout
+	}
+	return err
 }
 
 // Write runs fn as one atomic transaction holding the fence shared. If fn returns an
@@ -282,14 +394,19 @@ func (s *Store[ID, E]) commit(tx *Tx[ID, E]) error {
 		}
 	}
 	s.version++
+	var puts []E
+	var dels []ID
 	for id := range tx.dels {
 		delete(s.data, id)
 		s.touched[id] = s.version
+		dels = append(dels, id)
 	}
 	for id, e := range tx.puts {
 		s.data[id] = e
 		s.touched[id] = s.version
+		puts = append(puts, s.cfg.Clone(e))
 	}
+	s.recordLocked(puts, dels)
 	return nil
 }
 

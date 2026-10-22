@@ -16,7 +16,7 @@ func (c *Cache[ID, E]) Get(id ID) (E, Answer) {
 	switch {
 	case c.stale || c.unhealthy:
 		src = SourceStale
-	case c.pending[id] > 0:
+	case len(c.pending) > 0 && c.pending[id] > 0: // skip the lookup when idle
 		src = SourcePending
 	case !hit:
 		src = SourceMiss
@@ -47,7 +47,7 @@ func Lookup[ID comparable, E any, K comparable](c *Cache[ID, E], idx Index[ID, K
 	switch {
 	case c.stale || c.unhealthy:
 		src = SourceStale
-	case hit && c.pending[id] > 0:
+	case hit && len(c.pending) > 0 && c.pending[id] > 0:
 		src = SourcePending
 	case !hit && c.inFlight > 0:
 		// A create or update in flight may be adding the key (SAFE-2).

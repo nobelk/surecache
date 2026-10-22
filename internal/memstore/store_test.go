@@ -227,3 +227,24 @@ func TestStore_ConcurrentConflictCommitsNothing(t *testing.T) {
 		t.Fatalf("blind put = %v", err)
 	}
 }
+
+// The commit log records every commit after RecordHistory, with its version.
+func TestStore_History(t *testing.T) {
+	s := newStore(0)
+	s.Seed(item{ID: "a"})
+	base, baseVer := s.RecordHistory()
+	if len(base) != 1 || baseVer != s.Version() || baseVer != 1 {
+		t.Fatalf("base = %v at %d", base, baseVer)
+	}
+	ctx := context.Background()
+	_ = s.Write(ctx, func(tx *Tx[string, item]) error { tx.Put(item{ID: "b"}); return tx.Delete("a") })
+	_ = s.Write(ctx, func(*Tx[string, item]) error { return ErrPrecondition })
+	s.Seed(item{ID: "c"})
+	h := s.History()
+	if len(h) != 2 || h[0].Version != 2 || h[1].Version != 3 || s.Version() != 3 {
+		t.Fatalf("history = %+v", h)
+	}
+	if len(h[0].Puts) != 1 || h[0].Puts[0].ID != "b" || len(h[0].Dels) != 1 || h[0].Dels[0] != "a" {
+		t.Fatalf("commit = %+v", h[0])
+	}
+}

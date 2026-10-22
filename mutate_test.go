@@ -36,7 +36,7 @@ func TestMutate_DedupesIDs(t *testing.T) {
 				ids = append(ids, fmt.Sprint("x", i%3), "a")
 			}
 			var pending map[string]int
-			f.c.hooks = &hooks{afterMark: func(any) { pending = maps(f.c) }}
+			f.c.hooks = &hooks{afterMark: func(context.Context, any) { pending = maps(f.c) }}
 			if err := f.c.Mutate(t.Context(), ids, func() error { return nil }); err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +67,7 @@ func TestCreate_InFlightCountedOnce(t *testing.T) {
 	f := newFixture(t)
 	f.install()
 	var pending, inFlight int
-	f.c.hooks = &hooks{afterMark: func(ids any) {
+	f.c.hooks = &hooks{afterMark: func(_ context.Context, ids any) {
 		if ids.([]string) != nil {
 			t.Errorf("create marked ids %v", ids)
 		}

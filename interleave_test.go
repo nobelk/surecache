@@ -5,6 +5,7 @@ package surecache
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 )
@@ -237,4 +238,41 @@ func assertStructure(t *testing.T, f *fixture) {
 	if err := checkStructure(f.c); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// SAFE-1, SAFE-2: a refresh discarded by a newer same-entity refresh relies on the newer
+// one's batch to hold the entity pending until it installs. A create names no ids up
+// front, so its batch must mark the id itself: a delete of x whose refresh is discarded
+// by the re-create of x must not leave the old x readable once the delete releases.
+func TestCreate_RefreshHoldsMarkWhileItOwnsTheWindow(t *testing.T) {
+	f := newFixture(t, concurrent())
+	f.install(g("x", "", "k"))
+	delRead, createWindow := newGate(), newGate()
+	f.c.hooks = &hooks{
+		afterLoadOne:  nthLoadOne("x", 1, delRead),
+		beforeLoadOne: nthLoadOne("x", 2, createWindow),
+	}
+	deleted := make(chan error, 1)
+	go func() { deleted <- f.mutate(context.Background(), []string{"x"}, del("x")) }()
+	<-delRead.arrived // the delete committed and its refresh read "not found"
+	created := make(chan error, 1)
+	go func() {
+		_, err := f.create(context.Background(), g("x", "", "fresh"))
+		created <- err
+	}()
+	<-createWindow.arrived // the create committed and opened a newer window for x
+	close(delRead.release)
+	mustNil(t, deleted) // the delete's refresh was discarded; the delete released x
+	if e, a := f.get("x"); a != Defer {
+		t.Fatalf("Get(x) = %v, %v while the create's refresh owns x; the deleted value leaked", e, a)
+	}
+	if id, a := f.member("k"); a != Defer {
+		t.Fatalf("Lookup(k) = %q, %v; k left with the deleted x", id, a)
+	}
+	close(createWindow.release)
+	mustNil(t, created)
+	if e, a := f.get("x"); a != Found || !slices.Equal(e.Members, []string{"fresh"}) {
+		t.Fatalf("Get(x) = %v, %v after the create installed", e, a)
+	}
+	assertStructure(t, f)
 }

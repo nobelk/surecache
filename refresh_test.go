@@ -277,7 +277,7 @@ func TestMutate_MarksReleasedAfterSettle(t *testing.T) {
 	f := newFixture(t)
 	f.install(g("a", "o"))
 	checked := false
-	f.c.hooks = &hooks{beforeRelease: func(ids any) {
+	f.c.hooks = &hooks{beforeRelease: func(_ context.Context, ids any) {
 		f.c.mu.RLock()
 		defer f.c.mu.RUnlock()
 		e, _ := f.c.entities.Get("a")

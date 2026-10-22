@@ -72,13 +72,13 @@ func (c *Cache[ID, E]) guard(ctx context.Context, ids []ID, apply func()) {
 	c.inFlight++
 	c.mu.Unlock()
 	if h := c.hooks; h != nil && h.afterMark != nil {
-		h.afterMark(ids)
+		h.afterMark(ctx, ids)
 	}
 
 	settled := false
 	defer func() {
 		if h := c.hooks; h != nil && h.beforeRelease != nil {
-			h.beforeRelease(ids)
+			h.beforeRelease(ctx, ids)
 		}
 		var buf eventBuf
 		c.mu.Lock()

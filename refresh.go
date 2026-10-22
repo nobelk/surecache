@@ -19,6 +19,11 @@ type window struct {
 // the generation so an in-progress rebuild discards, does nothing more on a stale cache
 // (FUN-4), and otherwise opens every window before the first read (internal invariant
 // 10).
+//
+// The batch also marks every id pending while its windows are open. An older refresh
+// that a newer window discards leaves the entity to this batch, so the entity must
+// defer until this batch installs. Mutate's ids are pending already; Create's id is not,
+// because it is unknown until op returns.
 func (c *Cache[ID, E]) refreshBatch(ctx context.Context, ids []ID) {
 	captured := make([]uint64, len(ids))
 	stale := false
@@ -29,6 +34,7 @@ func (c *Cache[ID, E]) refreshBatch(ctx context.Context, ids []ID) {
 		}
 		for i, id := range ids {
 			captured[i] = c.beginRefreshLocked(id)
+			c.pending[id]++
 		}
 	})
 	if stale {
@@ -61,6 +67,9 @@ func (c *Cache[ID, E]) endRefresh(ctx context.Context, ids []ID) {
 				if w.active--; w.active <= 0 {
 					delete(c.refreshes, id)
 				}
+			}
+			if c.pending[id]--; c.pending[id] <= 0 {
+				delete(c.pending, id)
 			}
 		}
 	})

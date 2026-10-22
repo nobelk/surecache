@@ -258,3 +258,62 @@ func TestReads_NeverRebuild(t *testing.T) {
 		t.Fatalf("calls = %+v", c)
 	}
 }
+
+// Internal invariant 2: every generation change after the capture discards the rebuild,
+// including a refresh start followed by a mark-stale.
+func TestRebuild_DiscardedAfterRefreshStartAndMarkStale(t *testing.T) {
+	f := newFixture(t)
+	f.store.Seed(g("a", ""))
+	f.c.hooks = &hooks{afterLoadAll: func() {
+		if err := f.mutate(context.Background(), []string{"a"}, set(g("a", "o"))); err != nil {
+			t.Error(err)
+		}
+		f.c.markStale(context.Background(), errors.New("x"))
+	}}
+	if r, err := f.c.Prime(t.Context()); r != Discarded || err != nil {
+		t.Fatalf("Prime = %v, %v", r, err)
+	}
+}
+
+// SAFE-6, internal invariant 5: after an install, no refresh that began before it may
+// install, however many refreshes of the entity are open.
+func TestRebuild_InstallBumpsPastEveryOpenRefresh(t *testing.T) {
+	f := newFixture(t, concurrent())
+	f.prime(g("x", "o0"))
+	first, second := newGate(), newGate()
+	f.c.hooks = &hooks{afterLoadOne: func(v any) {
+		if v.(string) != "x" {
+			return
+		}
+		select {
+		case <-first.arrived:
+			select {
+			case <-second.arrived:
+			default:
+				second.block()
+			}
+		default:
+			first.block()
+		}
+	}}
+	r1 := f.runMutate([]string{"x"}, g("x", "o1"))
+	<-first.arrived // the first refresh read o1
+	r2 := f.runMutate([]string{"x"}, g("x", "o2"))
+	<-second.arrived // the second refresh read o2
+	f.store.InjectWrite(memstore.WriteFault{Kind: memstore.AmbiguousCommitted})
+	_ = f.mutate(context.Background(), []string{"x"}, set(g("x", "o3")))
+	f.c.mu.Lock()
+	f.c.generation++
+	captured := f.c.generation
+	f.c.mu.Unlock()
+	if r, err := f.c.rebuild(context.Background(), captured, TriggerLoop); r != Installed {
+		t.Fatalf("rebuild = %v, %v", r, err)
+	}
+	close(first.release)
+	mustNil(t, r1)
+	close(second.release)
+	mustNil(t, r2)
+	if e, a := f.get("x"); a != Found || e.Owner != "o3" {
+		t.Fatalf("Get = %v, %v; a refresh that began before the install overwrote it", e, a)
+	}
+}
