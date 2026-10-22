@@ -5,3 +5,8 @@ use (
 	./promobs
 	./surecachepg
 )
+
+// The nested modules require the root module at the placeholder v0.0.0 until the first
+// release (milestone 11). This workspace-only replace resolves it to the local tree;
+// the modules' own go.mod files carry no replace directives.
+replace github.com/nobelk/surecache v0.0.0 => ./
