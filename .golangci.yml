@@ -1,0 +1,100 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gocritic
+    - goheader
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nolintlint
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+  settings:
+    depguard:
+      rules:
+        # NFR-7: the root module (surecache, surecachetest, internal/..., scripts/...)
+        # imports only the standard library, tests included.
+        core-stdlib-only:
+          list-mode: strict
+          files:
+            - $all
+            - "!**/surecachepg/**"
+            - "!**/promobs/**"
+            - "!**/examples/**"
+          allow:
+            - $gostd
+            - github.com/nobelk/surecache
+          deny:
+            - pkg: github.com/nobelk/surecache/surecachepg
+              desc: separate module with third-party dependencies (NFR-7)
+            - pkg: github.com/nobelk/surecache/promobs
+              desc: separate module with third-party dependencies (NFR-7)
+    exhaustive:
+      default-signifies-exhaustive: false
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: write to an explicit io.Writer or use the injected slog.Logger
+        - pattern: ^log\.Print.*$
+          msg: use the injected slog.Logger
+        - pattern: ^time\.Sleep$
+          msg: use a ticker, timer or context; tests use testing/synctest
+    goheader:
+      template: "SPDX-License-Identifier: Apache-2.0"
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      rules:
+        - name: exported
+          arguments:
+            - checkPrivateReceivers
+            - sayRepetitiveInsteadOfStutters
+        - name: package-comments
+        - name: var-naming
+        - name: indent-error-flow
+        - name: error-strings
+        - name: error-naming
+        - name: receiver-naming
+        - name: unused-parameter
+  exclusions:
+    generated: lax
+    presets:
+      - std-error-handling
+    rules:
+      # time.Sleep in tests is reviewed by hand (only inside synctest bubbles);
+      # the lint is a backstop for non-test code.
+      - path: _test\.go
+        linters:
+          - forbidigo
+      # Test helpers deliberately ignore some results and use weak randomness.
+      - path: _test\.go
+        linters:
+          - gosec
+          - unparam
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/nobelk/surecache
