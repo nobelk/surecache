@@ -17,3 +17,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
   `Observer` interface with ordered state-event delivery, the capacity-bounded map, the
   build-aside bulk install and the `Get`, `Lookup` and `List` reads with their deferral
   rules.
+- `Mutate` and `Create` with pending and in-flight marks, outcome settlement, the
+  post-commit refresh with per-entity refresh windows, current-holder index removal,
+  the insert-side conflict check, capacity projection on refresh, and the panic rule on
+  every modifying region. `internal/memstore` gains deterministic fault injection.

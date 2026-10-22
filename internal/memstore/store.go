@@ -61,6 +61,10 @@ type Store[ID comparable, E any] struct {
 	version uint64
 	touched map[ID]uint64
 
+	writeFaults   []WriteFault
+	loadOneFaults []ReadFault
+	loadAllFaults []ReadFault
+
 	loadOne, loadAll, writes atomic.Int64
 
 	probe  func() bool
@@ -133,6 +137,11 @@ func (s *Store[ID, E]) LoadOne(ctx context.Context, id ID) (E, error) {
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
+	if f, ok := pop(&s.mu, &s.loadOneFaults); ok {
+		if err := applyReadFault(ctx, f); err != nil {
+			return zero, err
+		}
+	}
 	e, ok := s.Get(id)
 	if !ok {
 		return zero, ErrNotFound
@@ -152,6 +161,11 @@ func (s *Store[ID, E]) NotFound(err error) bool {
 func (s *Store[ID, E]) LoadAll(ctx context.Context) ([]E, error) {
 	s.loadAll.Add(1)
 	s.checkProbe("LoadAll")
+	if f, ok := pop(&s.mu, &s.loadAllFaults); ok {
+		if err := applyReadFault(ctx, f); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.fence.Lock(ctx); err != nil {
 		return nil, err
 	}
@@ -177,13 +191,51 @@ func (s *Store[ID, E]) LoadAll(ctx context.Context) ([]E, error) {
 func (s *Store[ID, E]) Write(ctx context.Context, fn func(tx *Tx[ID, E]) error) error {
 	s.writes.Add(1)
 	s.checkProbe("Write")
+	fault, _ := pop(&s.mu, &s.writeFaults)
 	if err := s.fence.RLock(ctx); err != nil {
 		return err
 	}
-	defer s.fence.RUnlock()
+	held := true
+	defer func() {
+		if held {
+			s.fence.RUnlock()
+		}
+	}()
 	tx := newTx(s)
 	if err := fn(tx); err != nil {
 		return err
+	}
+	switch fault.Kind {
+	case NothingCommitted:
+		return orDefault(fault.Err, ErrPrecondition)
+	case AmbiguousCommitted:
+		if err := s.commit(tx); err != nil {
+			return err
+		}
+		return orDefault(fault.Err, ErrAmbiguous)
+	case AmbiguousNotCommitted:
+		return orDefault(fault.Err, ErrAmbiguous)
+	case AbandonedCommit:
+		held = false
+		go func() {
+			<-fault.Release
+			_ = s.commit(tx)
+			s.fence.RUnlock()
+		}()
+		return orDefault(fault.Err, ErrAmbiguous)
+	case ContextAfterCommit:
+		if err := s.commit(tx); err != nil {
+			return err
+		}
+		return orDefault(fault.Err, context.Canceled)
+	case PanicWrite:
+		panic(fault.PanicValue)
+	case BlockWrite:
+		select {
+		case <-fault.Release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	return s.commit(tx)
 }

@@ -194,6 +194,51 @@ func TestLockedRegion_CallbackPanicLeavesStaleAndUnlocked(t *testing.T) {
 	}
 }
 
+// SAFE-11, internal invariant 11: the refresh install region follows the panic rule too.
+// The panic reaches the Mutate caller after every mark is released.
+func TestLockedRegion_RefreshCallbackPanic(t *testing.T) {
+	for _, name := range []string{"Cacheable", "index keys", "Clone"} {
+		t.Run(name, func(t *testing.T) {
+			armed := false
+			spec := groupSpec(10)
+			trip := func(which string) {
+				if armed && which == name {
+					panic(which)
+				}
+			}
+			spec.Cacheable = func(e group) bool { trip("Cacheable"); return !e.Deleted }
+			spec.Clone = func(e group) group { trip("Clone"); return cloneGroup(e) }
+			store := newGroupStore()
+			b := NewBuilder(spec, Source[string, group](store))
+			AddIndex(b, "member", func(e group) []string { trip("index keys"); return e.Members }, 10)
+			c, err := b.Build(WithOutagePolicy(testPolicy{}), WithCloneOnInstall())
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.Seed(g("a", "", "m"))
+			if err := installForTest(c, []group{g("a", "", "m")}); err != nil {
+				t.Fatal(err)
+			}
+			armed = true
+			func() {
+				defer func() {
+					if r := recover(); r != name {
+						t.Fatalf("recover = %v", r)
+					}
+				}()
+				_ = c.Mutate(t.Context(), []string{"a"}, func() error { return nil })
+			}()
+			if !c.mu.TryLock() {
+				t.Fatal("lock held after panic")
+			}
+			defer c.mu.Unlock()
+			if !c.stale || len(c.pending) != 0 || c.inFlight != 0 || len(c.refreshes) != 0 {
+				t.Fatalf("stale=%t pending=%v inFlight=%d windows=%d", c.stale, c.pending, c.inFlight, len(c.refreshes))
+			}
+		})
+	}
+}
+
 func assertNothingInstalled(t *testing.T, f *fixture) {
 	t.Helper()
 	if !f.isStale() {

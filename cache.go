@@ -36,6 +36,7 @@ type Cache[ID comparable, E any] struct {
 	pending    map[ID]int
 	inFlight   int
 	generation uint64
+	refreshes  map[ID]*window
 	stateQueue []stateEvent
 
 	// emitMu admits one deliverer of state events at a time (see drain).
@@ -44,14 +45,15 @@ type Cache[ID comparable, E any] struct {
 
 func newCache[ID comparable, E any](spec Spec[ID, E], src Source[ID, E], cfg config, owner *token, indexes []anyIndex[ID, E]) *Cache[ID, E] {
 	return &Cache[ID, E]{
-		spec:     spec,
-		src:      src,
-		cfg:      cfg,
-		owner:    owner,
-		entities: boundedmap.New[ID, E](spec.Capacity),
-		indexes:  indexes,
-		stale:    true,
-		pending:  map[ID]int{},
+		spec:      spec,
+		src:       src,
+		cfg:       cfg,
+		owner:     owner,
+		entities:  boundedmap.New[ID, E](spec.Capacity),
+		indexes:   indexes,
+		stale:     true,
+		pending:   map[ID]int{},
+		refreshes: map[ID]*window{},
 	}
 }
 

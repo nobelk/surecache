@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/nobelk/surecache/internal/boundedmap"
 	"github.com/nobelk/surecache/internal/memstore"
 )
 
@@ -67,6 +68,7 @@ type recorder struct {
 	NopObserver
 	mu     sync.Mutex
 	events []string
+	cause  error // the cause of the latest transition to stale
 }
 
 func (r *recorder) add(format string, args ...any) {
@@ -75,8 +77,15 @@ func (r *recorder) add(format string, args ...any) {
 	r.mu.Unlock()
 }
 
-func (r *recorder) Read(m Method, s ReadSource)          { r.add("read %s %s", m, s) }
-func (r *recorder) StaleChanged(stale bool, cause error) { r.add("stale %t %v", stale, cause != nil) }
+func (r *recorder) Read(m Method, s ReadSource) { r.add("read %s %s", m, s) }
+func (r *recorder) StaleChanged(stale bool, cause error) {
+	r.mu.Lock()
+	if stale {
+		r.cause = cause
+	}
+	r.mu.Unlock()
+	r.add("stale %t %v", stale, cause != nil)
+}
 func (r *recorder) UnhealthyChanged(u bool)              { r.add("unhealthy %t", u) }
 func (r *recorder) Entities(n int)                       { r.add("entities %d", n) }
 func (r *recorder) Rebuild(t Trigger, res RebuildResult) { r.add("rebuild %s %s", t, res) }
@@ -105,6 +114,8 @@ type fixture struct {
 type fixtureConfig struct {
 	capacity, memberCap, ownerCap int
 	opts                          []Option
+	source                        func(*memstore.Store[string, group]) Source[string, group]
+	noProbe                       bool
 }
 
 type fixtureOpt func(*fixtureConfig)
@@ -117,6 +128,18 @@ func withOptions(opts ...Option) fixtureOpt {
 	return func(c *fixtureConfig) { c.opts = append(c.opts, opts...) }
 }
 
+// withSource wraps the memstore in a custom Source.
+func withSource(wrap func(*memstore.Store[string, group]) Source[string, group]) fixtureOpt {
+	return func(c *fixtureConfig) { c.source = wrap }
+}
+
+// concurrent disables the lock probe, for tests where several goroutines use the cache
+// at once: an unrelated reader holding RLock would make the probe report a correct
+// store call.
+func concurrent() fixtureOpt {
+	return func(c *fixtureConfig) { c.noProbe = true }
+}
+
 func newFixture(t testing.TB, opts ...fixtureOpt) *fixture {
 	t.Helper()
 	cfg := fixtureConfig{capacity: 100, memberCap: 100, ownerCap: 100}
@@ -124,7 +147,11 @@ func newFixture(t testing.TB, opts ...fixtureOpt) *fixture {
 		o(&cfg)
 	}
 	f := &fixture{t: t, store: newGroupStore(), obs: &recorder{}}
-	b := NewBuilder(groupSpec(cfg.capacity), Source[string, group](f.store))
+	var src Source[string, group] = f.store
+	if cfg.source != nil {
+		src = cfg.source(f.store)
+	}
+	b := NewBuilder(groupSpec(cfg.capacity), src)
 	f.byMember = AddIndex(b, "member", groupMembers, cfg.memberCap)
 	f.byOwner = AddIndex(b, "owner", groupOwner, cfg.ownerCap)
 	all := append([]Option{WithOutagePolicy(testPolicy{}), WithObserver(f.obs)}, cfg.opts...)
@@ -134,6 +161,9 @@ func newFixture(t testing.TB, opts ...fixtureOpt) *fixture {
 	}
 	f.c = c
 	f.obs.take()
+	if !cfg.noProbe {
+		f.probeLock()
+	}
 	return f
 }
 
@@ -191,6 +221,13 @@ func (f *fixture) isStale() bool {
 	return f.c.stale
 }
 
+// staleCause returns the cause of the latest transition to stale.
+func (f *fixture) staleCause() error {
+	f.obs.mu.Lock()
+	defer f.obs.mu.Unlock()
+	return f.obs.cause
+}
+
 func (f *fixture) get(id string) (group, Answer) { return f.c.Get(id) }
 
 func (f *fixture) member(m string) (string, Answer) {
@@ -211,6 +248,119 @@ func (f *fixture) owner(o string) (string, Answer) {
 	return id, a
 }
 
+// mutate runs a store transaction through Mutate with the given ids.
+func (f *fixture) mutate(ctx context.Context, ids []string, fn func(tx *memstore.Tx[string, group]) error) error {
+	return f.c.Mutate(ctx, ids, func() error { return f.store.Write(ctx, fn) })
+}
+
+// create inserts e through Create.
+func (f *fixture) create(ctx context.Context, e group) (string, error) {
+	return f.c.Create(ctx, func() (string, error) {
+		err := f.store.Write(ctx, func(tx *memstore.Tx[string, group]) error { return tx.Insert(e) })
+		return e.ID, err
+	})
+}
+
+// set replaces whole entities in one transaction.
+func set(es ...group) func(tx *memstore.Tx[string, group]) error {
+	return func(tx *memstore.Tx[string, group]) error {
+		for _, e := range es {
+			tx.Put(e)
+		}
+		return nil
+	}
+}
+
+// del deletes entities in one transaction.
+func del(ids ...string) func(tx *memstore.Tx[string, group]) error {
+	return func(tx *memstore.Tx[string, group]) error {
+		for _, id := range ids {
+			if err := tx.Delete(id); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// marks returns the pending map size and the in-flight count.
+func (f *fixture) marks() (pending, inFlight, windows int) {
+	f.c.mu.RLock()
+	defer f.c.mu.RUnlock()
+	return len(f.c.pending), f.c.inFlight, len(f.c.refreshes)
+}
+
+// gate blocks one hook call until released.
+type gate struct {
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func newGate() *gate {
+	return &gate{arrived: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gate) block() {
+	close(g.arrived)
+	<-g.release
+}
+
+// onID returns a hook that blocks on gt the first time it sees id, and passes others.
+func onID(id string, gt *gate) func(any) {
+	var once sync.Once
+	return func(v any) {
+		if v.(string) == id {
+			once.Do(gt.block)
+		}
+	}
+}
+
 func g(id string, owner string, members ...string) group {
 	return group{ID: id, Name: "group " + id, Owner: owner, Members: members}
+}
+
+type txn = memstore.Tx[string, group]
+
+// checkStructure verifies the structural invariant under the read lock: every index
+// entry names an entity that holds the key, every key of every cached entity is indexed
+// to that entity, and the directory is the sorted key set of the entities.
+func checkStructure[ID comparable, E any](c *Cache[ID, E]) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, ix := range c.indexes {
+		if err := ix.(interface {
+			check(*boundedmap.Map[ID, E]) error
+		}).check(c.entities); err != nil {
+			return err
+		}
+	}
+	if len(c.directory) != c.entities.Len() {
+		return fmt.Errorf("directory has %d ids, entities %d", len(c.directory), c.entities.Len())
+	}
+	for i, id := range c.directory {
+		if _, ok := c.entities.Get(id); !ok {
+			return fmt.Errorf("directory id %v not cached", id)
+		}
+		if i > 0 && c.spec.Compare(c.directory[i-1], id) >= 0 {
+			return fmt.Errorf("directory not strictly sorted at %d", i)
+		}
+	}
+	return nil
+}
+
+func (ix *index[ID, E, K]) check(entities *boundedmap.Map[ID, E]) error {
+	for k, holder := range ix.m.All() {
+		e, ok := entities.Get(holder)
+		if !ok || !slices.Contains(ix.keys(e), k) {
+			return fmt.Errorf("index %s: key %v names %v, which does not hold it", ix.name, k, holder)
+		}
+	}
+	for id, e := range entities.All() {
+		for _, k := range ix.keys(e) {
+			if holder, ok := ix.m.Get(k); !ok || holder != id {
+				return fmt.Errorf("index %s: key %v of %v indexed to %v (present=%t)", ix.name, k, id, holder, ok)
+			}
+		}
+	}
+	return nil
 }
