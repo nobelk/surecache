@@ -61,7 +61,10 @@ func modelSeedList() []uint64 {
 }
 
 const (
-	minAnswerRatio = 0.10
+	// minQuietRatio is the share of reads a trusted, idle cache must answer. Gets of ids
+	// that do not exist always defer, so it is well below 1.
+	minQuietRatio = 0.5
+	minQuietReads = 20
 
 	modelIDs     = 8
 	modelMembers = 6
@@ -89,6 +92,8 @@ type modelRun struct {
 
 	eventsMu sync.Mutex
 	events   []stamped
+
+	quiet [][2]int64 // trusted idle windows on the logical clock
 
 	// idle is open during an idle phase, when writers wait, so the loop can restore
 	// trust and readers get answers to check; it is closed when the phase ends.
@@ -161,11 +166,7 @@ func runModel(t *testing.T, seed uint64, mutateReturned bool) {
 	if len(violations) > 0 {
 		m.diagnose(h)
 	}
-	// A cache that defers everything must not pass silently: idle phases give the loop
-	// time to restore trust, so a healthy run answers a fair share of reads.
-	if ratio := float64(st.Answered) / float64(max(st.Reads, 1)); ratio < minAnswerRatio {
-		t.Errorf("the cache answered %.1f%% of %d reads, want at least %.0f%%", 100*ratio, st.Reads, 100*minAnswerRatio)
-	}
+	m.checkQuietAnswers()
 	t.Logf("reads=%d answered=%d deferred=%d commits=%d windows=%d", st.Reads, st.Answered, st.Deferred, len(commits), len(m.wins))
 }
 
@@ -260,6 +261,9 @@ func (m *modelRun) writer(rng *rand.Rand, deadline time.Time) {
 }
 
 // phases alternates active phases (writers run) and idle phases (writers wait).
+// phases alternates active phases, when writers run, and idle phases, when they wait.
+// An idle phase waits for the loop to restore trust and then records a quiet window on
+// the logical clock, in which the cache must answer most reads.
 func (m *modelRun) phases(deadline time.Time) {
 	wait := func(d time.Duration) {
 		timer := time.NewTimer(d)
@@ -269,9 +273,48 @@ func (m *modelRun) phases(deadline time.Time) {
 		wait(3 * time.Millisecond)
 		idle := make(chan struct{})
 		m.idle.Store(&idle)
-		wait(5 * time.Millisecond)
+		for limit := time.Now().Add(100 * time.Millisecond); !m.trustedAndIdle() && time.Now().Before(limit); {
+			wait(200 * time.Microsecond)
+		}
+		if m.trustedAndIdle() {
+			start := m.clock.Add(1)
+			wait(5 * time.Millisecond)
+			m.mu.Lock()
+			m.quiet = append(m.quiet, [2]int64{start, m.clock.Add(1)})
+			m.mu.Unlock()
+		}
 		m.idle.Store(nil)
 		close(idle)
+	}
+}
+
+func (m *modelRun) trustedAndIdle() bool {
+	m.f.c.mu.RLock()
+	defer m.f.c.mu.RUnlock()
+	return !m.f.c.stale && m.f.c.inFlight == 0
+}
+
+// checkQuietAnswers fails a run in which the cache never answered while trusted and
+// idle: a cache that defers everything must not pass silently.
+func (m *modelRun) checkQuietAnswers() {
+	var reads, answered int
+	for _, r := range m.reads {
+		for _, q := range m.quiet {
+			if r.S0 > q[0] && r.S1 < q[1] {
+				reads++
+				if r.Answer != model.Defer {
+					answered++
+				}
+				break
+			}
+		}
+	}
+	if reads < minQuietReads {
+		m.t.Errorf("only %d reads in %d trusted idle windows; want at least %d", reads, len(m.quiet), minQuietReads)
+		return
+	}
+	if ratio := float64(answered) / float64(reads); ratio < minQuietRatio {
+		m.t.Errorf("the trusted, idle cache answered %.1f%% of %d reads, want at least %.0f%%", 100*ratio, reads, 100*minQuietRatio)
 	}
 }
 
