@@ -84,6 +84,11 @@ linters:
       - path: _test\.go
         linters:
           - forbidigo
+      # Tests assert that context errors come back unwrapped, which needs ==.
+      - path: _test\.go
+        linters:
+          - errorlint
+        text: "comparing with"
       # Test helpers deliberately ignore some results and use weak randomness.
       - path: _test\.go
         linters:
