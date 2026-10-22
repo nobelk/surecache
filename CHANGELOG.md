@@ -8,6 +8,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-22
+
+First release of `surecache`, `surecachepg/v0.1.0` and `promobs/v0.1.0`. The API is
+pre-1.0 and may change.
+
 ### Added
 
 - Repository scaffold: root, `surecachepg` and `promobs` modules with a committed Go
@@ -44,3 +49,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
   sets.
 - Godoc examples, the `examples/groups` PostgreSQL decorator module, complete package
   documentation, the README and the operations runbook.
+
+[Unreleased]: https://github.com/nobelk/surecache/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/nobelk/surecache/releases/tag/v0.1.0
