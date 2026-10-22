@@ -22,3 +22,7 @@ unleash:
 #     capture holds, since Prime is refused once primed, ticks never overlap, and every
 #     other change increments.
 #   run.go tick `c.generation++` to `--`: same reason as Prime.
+#   refresh.go endRefresh `c.pending[id] <= 0` (boundary): the count never drops below
+#     zero, since every decrement pairs with an increment, so `<= 0` and `< 1` agree.
+#   surecachetest/suite.go timing arithmetic and fence-wait retry conditions: the
+#     real-time windows have slack by design; mutating them changes timing, not verdicts.
