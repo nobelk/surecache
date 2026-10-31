@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 
 ## [Unreleased]
 
+### Fixed
+
+- Mark refreshes stale before releasing their pending marks on panic, including
+  observer panics while opening refresh windows (SAFE-2, SAFE-11, invariants 3 and 11).
+- Prevent snapshot connection access through PostgreSQL results, custom row scanners,
+  and query rewriters. Snapshot queries now reject `pgx.QueryRewriter` (including
+  `pgx.NamedArgs`); use positional parameters instead.
+- Reject overflowing aggregate PostgreSQL read bounds and compare rebuild budgets
+  without overflowing duration arithmetic.
+- Drain admitted model-test writers before intermediate idle checks, then verify cache
+  structure, released marks, and exact agreement with the store throughout each run.
+
 ## [0.1.0] - 2026-10-22
 
 First release of `surecache`, `surecachepg/v0.1.0` and `promobs/v0.1.0`. The API is

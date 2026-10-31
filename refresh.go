@@ -26,7 +26,14 @@ type window struct {
 // because it is unknown until op returns.
 func (c *Cache[ID, E]) refreshBatch(ctx context.Context, ids []ID) {
 	captured := make([]uint64, len(ids))
-	stale := false
+	stale, opened, completed := false, false, false
+	// Register before opening windows: withWriteLock emits queued events on its
+	// way out, and an observer panic must not strand batch-owned marks.
+	defer func() {
+		if opened {
+			c.endRefresh(ctx, ids, completed)
+		}
+	}()
 	c.withWriteLock(ctx, func(*eventBuf) {
 		c.generation++
 		if stale = c.stale; stale {
@@ -36,17 +43,18 @@ func (c *Cache[ID, E]) refreshBatch(ctx context.Context, ids []ID) {
 			captured[i] = c.beginRefreshLocked(id)
 			c.pending[id]++
 		}
+		opened = true
 	})
 	if stale {
 		return
 	}
-	defer c.endRefresh(ctx, ids)
 	if h := c.hooks; h != nil && h.beforeRefresh != nil {
 		h.beforeRefresh(ids)
 	}
 	for i, id := range ids {
 		c.refreshOne(ctx, id, captured[i])
 	}
+	completed = true
 }
 
 func (c *Cache[ID, E]) beginRefreshLocked(id ID) uint64 {
@@ -60,8 +68,14 @@ func (c *Cache[ID, E]) beginRefreshLocked(id ID) uint64 {
 	return w.gen
 }
 
-func (c *Cache[ID, E]) endRefresh(ctx context.Context, ids []ID) {
+func (c *Cache[ID, E]) endRefresh(ctx context.Context, ids []ID, completed bool) {
 	c.withWriteLock(ctx, func(*eventBuf) {
+		// A create has no guard-owned pending id. On panic, these may be the last
+		// marks protecting an old value left by a discarded refresh. Distrust it
+		// atomically before releasing any marks (SAFE-11).
+		if !completed {
+			c.markStaleLocked(ctx, ErrUnsettled)
+		}
 		for _, id := range ids {
 			if w := c.refreshes[id]; w != nil {
 				if w.active--; w.active <= 0 {

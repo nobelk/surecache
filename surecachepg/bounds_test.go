@@ -95,6 +95,92 @@ func TestBounds_FenceWaitAndReadBound(t *testing.T) {
 	}
 }
 
+// Section 4.6 and plan clarification 13: the aggregate read bound must not wrap.
+func TestBounds_ReadBoundOverflow(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout time.Duration
+		count   int
+	}{
+		{"huge count", math.MaxInt32 * time.Millisecond, math.MaxInt},
+		{"huge duration", time.Duration(math.MaxInt64), 1},
+		{"duration product", time.Duration(math.MaxInt64 / 2), 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := DefaultBounds()
+			b.ReadStatementTimeout = tc.timeout
+			b.MaxReadStatements = tc.count
+			if got := b.ReadBound(); got != time.Duration(math.MaxInt64) {
+				t.Fatalf("ReadBound = %v, want saturation", got)
+			}
+			if err := b.Validate(); !errors.Is(err, ErrInvalidBounds) {
+				t.Fatalf("Validate = %v, want ErrInvalidBounds", err)
+			}
+		})
+	}
+}
+
+// Section 4.6: a one-nanosecond increase rounds every statement up by a
+// millisecond and can overflow an otherwise representable aggregate.
+func TestBounds_ReadBoundRoundingCrossesLimit(t *testing.T) {
+	b := DefaultBounds()
+	b.ReadStatementTimeout = 10 * time.Second
+	b.MaxReadStatements = 922337203
+	if err := b.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.ReadBound(); got != 9223372030*time.Second {
+		t.Fatalf("ReadBound = %v", got)
+	}
+	b.ReadStatementTimeout++
+	if got := b.ReadBound(); got != time.Duration(math.MaxInt64) {
+		t.Fatalf("rounded ReadBound = %v, want saturation", got)
+	}
+	if err := b.Validate(); !errors.Is(err, ErrInvalidBounds) {
+		t.Fatalf("Validate rounded overflow = %v", err)
+	}
+}
+
+// Section 4.6: invalid inputs must not produce a wrapped read bound.
+func TestBounds_ReadBoundNonpositive(t *testing.T) {
+	for _, patch := range []func(*Bounds){
+		func(b *Bounds) { b.ReadStatementTimeout = 0 },
+		func(b *Bounds) { b.ReadStatementTimeout = time.Duration(math.MinInt64) },
+		func(b *Bounds) { b.MaxReadStatements = 0 },
+		func(b *Bounds) { b.MaxReadStatements = math.MinInt },
+	} {
+		b := DefaultBounds()
+		patch(&b)
+		if got := b.ReadBound(); got != 0 {
+			t.Errorf("ReadBound = %v, want zero for nonpositive input", got)
+		}
+	}
+}
+
+// Section 4.6: even representable individual bounds can overflow when added.
+func TestCheckBudgets_LargeBoundary(t *testing.T) {
+	b := DefaultBounds()
+	b.ReadStatementTimeout = math.MaxInt32 * time.Millisecond
+	b.MaxReadStatements = int(int64(math.MaxInt64) / int64(b.ReadStatementTimeout))
+	b.FenceLockTimeout = b.ReadStatementTimeout
+	b.FenceStatementTimeout = b.ReadStatementTimeout
+	if err := b.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckBudgets(b, time.Duration(math.MaxInt64)); !errors.Is(err, ErrBudget) {
+		t.Fatalf("CheckBudgets with overflowing sum = %v, want ErrBudget", err)
+	}
+	b.FenceLockTimeout = time.Millisecond
+	budget := b.ReadBound() + b.FenceWait()
+	if err := CheckBudgets(b, budget); !errors.Is(err, ErrBudget) {
+		t.Fatalf("CheckBudgets at equality = %v, want ErrBudget", err)
+	}
+	if err := CheckBudgets(b, budget+1); err != nil {
+		t.Fatalf("CheckBudgets one nanosecond above = %v", err)
+	}
+}
+
 func TestCheckBudgets(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -103,6 +189,9 @@ func TestCheckBudgets(t *testing.T) {
 		wantErr error
 	}{
 		{"defaults fit", func(*Bounds) {}, 4 * time.Second, nil},
+		{"zero budget", func(*Bounds) {}, 0, ErrBudget},
+		{"negative budget", func(*Bounds) {}, -time.Second, ErrBudget},
+		{"minimum budget", func(*Bounds) {}, time.Duration(math.MinInt64), ErrBudget},
 		{"equal is not less", func(*Bounds) {}, 3500 * time.Millisecond, ErrBudget},
 		{"read bound counts every statement", func(b *Bounds) { b.MaxReadStatements = 3 }, 4 * time.Second, ErrBudget},
 		{"rounding is applied", func(b *Bounds) {

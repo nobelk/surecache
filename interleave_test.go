@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+
+	"github.com/nobelk/surecache/internal/memstore"
 )
 
 // Deterministic interleavings of section 11.1, driven by hooks and channels. Each test
@@ -229,6 +231,110 @@ func TestRefresh_ConflictMarksStaleMapsUntouched(t *testing.T) {
 		t.Fatalf("x changed: %v", x)
 	}
 }
+
+// SAFE-11: a panicking create refresh must mark stale before releasing its last
+// pending mark, even when an older delete refresh discarded its result.
+func TestCreate_RefreshPanicMarksStaleBeforeReleasingPending(t *testing.T) {
+	for _, where := range []string{"store", "key"} {
+		t.Run(where, func(t *testing.T) {
+			f := newFixture(t, concurrent())
+			f.install(g("x", "", "old"))
+			delRead, createWindow := newGate(), newGate()
+			panicValue := errors.New("refresh panic")
+			if where == "key" {
+				f.c.spec.Key = func(e group) string {
+					if slices.Contains(e.Members, "fresh") {
+						panic(panicValue)
+					}
+					return e.ID
+				}
+			}
+			f.c.hooks = &hooks{
+				afterLoadOne:  nthLoadOne("x", 1, delRead),
+				beforeLoadOne: nthLoadOne("x", 2, createWindow),
+				beforeRelease: func(_ context.Context, ids any) {
+					if len(ids.([]string)) != 0 {
+						return // only inspect the create, before guard cleanup
+					}
+					if !f.isStale() {
+						t.Error("panicking refresh released its marks before marking stale")
+					}
+					if e, a := f.get("x"); a != Defer {
+						t.Errorf("Get during panic cleanup = %v, %v", e, a)
+					}
+					if id, a := f.member("old"); a != Defer {
+						t.Errorf("Lookup during panic cleanup = %q, %v", id, a)
+					}
+				},
+			}
+			deleted := make(chan error, 1)
+			go func() { deleted <- f.mutate(context.Background(), []string{"x"}, del("x")) }()
+			<-delRead.arrived
+			if where == "store" {
+				f.store.InjectLoadOne(memstore.ReadFault{Kind: memstore.PanicRead, PanicValue: panicValue})
+			}
+			panicked := make(chan any, 1)
+			go func() {
+				defer func() { panicked <- recover() }()
+				_, _ = f.create(context.Background(), g("x", "", "fresh"))
+			}()
+			<-createWindow.arrived
+			close(delRead.release)
+			mustNil(t, deleted)
+			close(createWindow.release)
+			if got := <-panicked; got != panicValue {
+				t.Fatalf("panic = %v, want original %v", got, panicValue)
+			}
+			if p, n, w := f.marks(); p+n+w != 0 {
+				t.Fatalf("marks leaked: pending=%d inFlight=%d windows=%d", p, n, w)
+			}
+		})
+	}
+}
+
+// SAFE-11, internal invariant 3: opening refresh windows also delivers queued
+// state events. An observer panic there must not leak the batch's marks.
+func TestCreate_OpeningRefreshObserverPanicReleasesMarks(t *testing.T) {
+	f := newFixture(t)
+	f.install(g("x", "", "old"))
+	panicValue := errors.New("observer panic")
+	f.c.cfg.observer = panicRefreshObserver{panicValue: panicValue}
+	f.c.hooks = &hooks{afterOp: func() {
+		// Model a state event queued by another operation but not yet delivered.
+		f.c.mu.Lock()
+		f.c.queueStateLocked(stateEvent{kind: stateEntities, n: 1})
+		f.c.mu.Unlock()
+	}}
+	func() {
+		defer func() {
+			if got := recover(); got != panicValue {
+				t.Errorf("panic = %v, want %v", got, panicValue)
+			}
+		}()
+		_, _ = f.create(t.Context(), g("y", "", "fresh"))
+	}()
+	if !f.isStale() {
+		t.Fatal("observer panic left cache trusted")
+	}
+	if p, n, w := f.marks(); p+n+w != 0 {
+		t.Fatalf("marks leaked: pending=%d inFlight=%d windows=%d", p, n, w)
+	}
+	f.c.cfg.observer = f.obs
+	f.c.hooks = nil
+	if result, err := f.c.Prime(t.Context()); result != Installed || err != nil {
+		t.Fatalf("Prime after panic = %v, %v", result, err)
+	}
+	if _, a := f.get("y"); a != Found {
+		t.Fatalf("Get after recovery = %v", a)
+	}
+}
+
+type panicRefreshObserver struct {
+	NopObserver
+	panicValue any
+}
+
+func (o panicRefreshObserver) Entities(int) { panic(o.panicValue) }
 
 // assertStructure checks the structural invariant under the lock: every index entry
 // names an entity that holds the key, every key of every entity is indexed to it, and
