@@ -8,6 +8,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 
 ## [Unreleased]
 
+### Added
+
+- README build/test/run instructions, single-writer use cases, a compiled quick-start
+  regression, and a measured coverage report in `docs/test-coverage.md`.
+- Negative-path coverage for conformance diagnostics, PostgreSQL transaction cleanup,
+  Prometheus registration rollback, example repository failures, and HTTP lifecycle.
+- `make cover-all` for cross-module coverage reports; PostgreSQL CI records profiles
+  and enforces the adapter's 90% acceptance gate.
+
+### Fixed
+
+- Run `promobs` allocation assertions alongside core assertions in `make alloc`.
+- Cancel active example HTTP requests when the service stops and force-close their
+  connections if the graceful-shutdown budget expires.
+- Mark refreshes stale before releasing their pending marks on panic, including
+  observer panics while opening refresh windows (SAFE-2, SAFE-11, invariants 3 and 11).
+- Prevent snapshot connection access through PostgreSQL results, custom row scanners,
+  and query rewriters. Snapshot queries now reject `pgx.QueryRewriter` (including
+  `pgx.NamedArgs`); use positional parameters instead.
+- Reject overflowing aggregate PostgreSQL read bounds and compare rebuild budgets
+  without overflowing duration arithmetic.
+- Drain admitted model-test writers before intermediate idle checks, then verify cache
+  structure, released marks, and exact agreement with the store throughout each run.
+
 ## [0.1.0] - 2026-10-22
 
 First release of `surecache`, `surecachepg/v0.1.0` and `promobs/v0.1.0`. The API is

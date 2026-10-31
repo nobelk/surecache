@@ -59,6 +59,7 @@ func DefaultBounds() Bounds {
 // Validate rejects any bound that would be disabled or out of range on the server: every
 // duration must be positive and, rounded up to whole milliseconds, at most
 // math.MaxInt32 ms; MaxReadStatements and the keepalive values must be positive.
+// The aggregate rounded read bound must also fit in a time.Duration.
 func (b Bounds) Validate() error {
 	var errs []error
 	for _, d := range []struct {
@@ -80,6 +81,11 @@ func (b Bounds) Validate() error {
 	if b.MaxReadStatements < 1 {
 		errs = append(errs, fmt.Errorf("%w: MaxReadStatements must be at least 1", ErrInvalidBounds))
 	}
+	if b.ReadStatementTimeout > 0 && b.MaxReadStatements > 0 {
+		if _, ok := b.checkedReadBound(); !ok {
+			errs = append(errs, fmt.Errorf("%w: ReadStatementTimeout times MaxReadStatements exceeds time.Duration", ErrInvalidBounds))
+		}
+	}
 	if b.KeepAlive.Idle <= 0 {
 		errs = append(errs, fmt.Errorf("%w: KeepAlive.Idle must be positive", ErrInvalidBounds))
 	}
@@ -100,9 +106,24 @@ func (b Bounds) FenceWait() time.Duration {
 
 // ReadBound is the longest the snapshot read can take: the rounded statement timeout
 // times MaxReadStatements, since statement_timeout bounds each statement, not the
-// transaction.
+// transaction. It saturates at math.MaxInt64 if the aggregate cannot be represented
+// as a time.Duration; Validate rejects such bounds. A nonpositive timeout or statement
+// count returns zero and is also rejected by Validate.
 func (b Bounds) ReadBound() time.Duration {
-	return time.Duration(millis(b.ReadStatementTimeout)*int64(b.MaxReadStatements)) * time.Millisecond
+	bound, _ := b.checkedReadBound()
+	return bound
+}
+
+func (b Bounds) checkedReadBound() (time.Duration, bool) {
+	if b.ReadStatementTimeout <= 0 || b.MaxReadStatements <= 0 {
+		return 0, false
+	}
+	ms := millis(b.ReadStatementTimeout)
+	// Check before either multiplication, including the conversion to nanoseconds.
+	if ms > (math.MaxInt64/int64(time.Millisecond))/int64(b.MaxReadStatements) {
+		return time.Duration(math.MaxInt64), false
+	}
+	return time.Duration(ms*int64(b.MaxReadStatements)) * time.Millisecond, true
 }
 
 // CheckBudgets returns an error unless b is valid and FenceWait() + ReadBound() is less
@@ -111,8 +132,12 @@ func CheckBudgets(b Bounds, rebuildBudget time.Duration) error {
 	if err := b.Validate(); err != nil {
 		return err
 	}
-	if total := b.FenceWait() + b.ReadBound(); total >= rebuildBudget {
-		return fmt.Errorf("%w: %v + %v >= %v", ErrBudget, b.FenceWait(), b.ReadBound(), rebuildBudget)
+	fence, read := b.FenceWait(), b.ReadBound()
+	// Validation makes both bounds positive. Short-circuit before subtracting so
+	// even a nonpositive budget cannot underflow, and never form the possibly
+	// unrepresentable sum.
+	if rebuildBudget <= fence || read >= rebuildBudget-fence {
+		return fmt.Errorf("%w: %v + %v >= %v", ErrBudget, fence, read, rebuildBudget)
 	}
 	return nil
 }

@@ -95,9 +95,64 @@ type modelRun struct {
 
 	quiet [][2]int64 // trusted idle windows on the logical clock
 
-	// idle is open during an idle phase, when writers wait, so the loop can restore
-	// trust and readers get answers to check; it is closed when the phase ends.
-	idle atomic.Pointer[chan struct{}]
+	writers         modelQuiescence
+	quiescentChecks int // written by the phase driver, read after it joins
+}
+
+// modelQuiescence closes admission atomically with starting an idle phase. Unlike
+// a sampled idle flag, it also accounts for writers admitted just before the phase.
+// Its mutex is never held across cache calls, hooks, or the idle callback.
+// The zero value is ready to use.
+type modelQuiescence struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	idle   bool
+	active int
+}
+
+func (q *modelQuiescence) initLocked() {
+	if q.cond == nil {
+		q.cond = sync.NewCond(&q.mu)
+	}
+}
+
+func (q *modelQuiescence) enter() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.initLocked()
+	for q.idle {
+		q.cond.Wait()
+	}
+	q.active++
+}
+
+func (q *modelQuiescence) leave() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.active--
+	if q.active == 0 {
+		q.cond.Broadcast()
+	}
+}
+
+func (q *modelQuiescence) withIdle(check func()) {
+	q.mu.Lock()
+	q.initLocked()
+	for q.idle {
+		q.cond.Wait()
+	}
+	q.idle = true
+	for q.active != 0 {
+		q.cond.Wait()
+	}
+	q.mu.Unlock()
+	defer func() {
+		q.mu.Lock()
+		q.idle = false
+		q.cond.Broadcast()
+		q.mu.Unlock()
+	}()
+	check()
 }
 
 type windowKey struct{}
@@ -142,9 +197,13 @@ func runModel(t *testing.T, seed uint64, mutateReturned bool) {
 	}
 	wg.Wait()
 	m.releaseAll()
+	if m.quiescentChecks == 0 {
+		t.Error("no intermediate quiescent structural checks ran")
+	}
 
-	m.awaitTrusted()
-	m.checkQuiescent()
+	if m.awaitTrusted() {
+		m.checkQuiescent()
+	}
 	stopRun()
 	if err := <-runDone; err != nil {
 		t.Fatalf("Run = %v", err)
@@ -167,7 +226,7 @@ func runModel(t *testing.T, seed uint64, mutateReturned bool) {
 		m.diagnose(h)
 	}
 	m.checkQuietAnswers()
-	t.Logf("reads=%d answered=%d deferred=%d commits=%d windows=%d", st.Reads, st.Answered, st.Deferred, len(commits), len(m.wins))
+	t.Logf("reads=%d answered=%d deferred=%d commits=%d windows=%d quiescentChecks=%d", st.Reads, st.Answered, st.Deferred, len(commits), len(m.wins), m.quiescentChecks)
 }
 
 var modelSpec = model.Spec[string, group]{
@@ -252,40 +311,40 @@ func (m *modelRun) reader(rng *rand.Rand, deadline time.Time) {
 // writer runs random mutations, classified per PRE-4, with injected faults.
 func (m *modelRun) writer(rng *rand.Rand, deadline time.Time) {
 	for time.Now().Before(deadline) {
-		if idle := m.idle.Load(); idle != nil {
-			<-*idle // wait out the idle phase
-		}
-		m.injectFault(rng)
-		m.mutation(rng)
+		func() {
+			m.writers.enter()
+			defer m.writers.leave()
+			m.injectFault(rng)
+			m.mutation(rng)
+		}()
 	}
 }
 
-// phases alternates active phases (writers run) and idle phases (writers wait).
-// phases alternates active phases, when writers run, and idle phases, when they wait.
-// An idle phase waits for the loop to restore trust and then records a quiet window on
-// the logical clock, in which the cache must answer most reads.
+// phases preserves concurrent active phases and checks genuine quiescent points
+// throughout the workload, not just after the writers have exited.
 func (m *modelRun) phases(deadline time.Time) {
-	wait := func(d time.Duration) {
-		timer := time.NewTimer(d)
-		<-timer.C
-	}
 	for time.Now().Before(deadline) {
-		wait(3 * time.Millisecond)
-		idle := make(chan struct{})
-		m.idle.Store(&idle)
-		for limit := time.Now().Add(100 * time.Millisecond); !m.trustedAndIdle() && time.Now().Before(limit); {
-			wait(200 * time.Microsecond)
-		}
-		if m.trustedAndIdle() {
-			start := m.clock.Add(1)
-			wait(5 * time.Millisecond)
-			m.mu.Lock()
-			m.quiet = append(m.quiet, [2]int64{start, m.clock.Add(1)})
-			m.mu.Unlock()
-		}
-		m.idle.Store(nil)
-		close(idle)
+		time.Sleep(3 * time.Millisecond)
+		m.idlePhase(5 * time.Millisecond)
 	}
+}
+
+func (m *modelRun) idlePhase(duration time.Duration) {
+	m.writers.withIdle(func() {
+		// Abandoned store commits can outlive their cache mutation. Release their
+		// gates; restoring trust then waits for the store's fenced rebuild, which
+		// drains those commits too.
+		m.releaseAll()
+		if !m.awaitTrusted() {
+			return // withIdle still resumes the writers on failure
+		}
+		m.checkQuiescent()
+		start := m.clock.Add(1)
+		time.Sleep(duration)
+		m.mu.Lock()
+		m.quiet = append(m.quiet, [2]int64{start, m.clock.Add(1)})
+		m.mu.Unlock()
+	})
 }
 
 func (m *modelRun) trustedAndIdle() bool {
@@ -528,22 +587,21 @@ func (o modelObserver) Rebuild(tr Trigger, r RebuildResult) {
 	o.add(fmt.Sprintf("rebuild %s %s", tr, r))
 }
 
-// awaitTrusted waits, in real time, for the loop to rebuild after the run.
-func (m *modelRun) awaitTrusted() {
+// awaitTrusted waits for the loop to restore trust after admitted writers drain.
+// Report rather than Fatal: a phase failure must not strand the other workers.
+func (m *modelRun) awaitTrusted() bool {
 	timeout := time.After(10 * time.Second)
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	for {
-		m.f.c.mu.RLock()
-		trusted := !m.f.c.stale && m.f.c.inFlight == 0
-		m.f.c.mu.RUnlock()
-		if trusted {
-			return
+		if m.trustedAndIdle() {
+			return true
 		}
 		select {
 		case <-ticker.C:
 		case <-timeout:
-			m.t.Fatalf("cache did not become trusted after the run: %v", m.f.staleCause())
+			m.t.Errorf("cache did not become trusted while quiescent: %v", m.f.staleCause())
+			return false
 		}
 	}
 }
@@ -551,6 +609,7 @@ func (m *modelRun) awaitTrusted() {
 // checkQuiescent checks the structural invariant and exact agreement with the store on
 // the idle, trusted cache, and that the idle cache answers every cacheable read.
 func (m *modelRun) checkQuiescent() {
+	m.quiescentChecks++
 	t := m.t
 	if err := checkStructure(m.f.c); err != nil {
 		t.Errorf("structural invariant: %v", err)
