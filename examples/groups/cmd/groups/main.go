@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,6 +46,17 @@ func main() {
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	return runWithListener(ctx, nil)
+}
+
+// runWithListener owns listener, including on startup failure. A nil listener uses
+// the production address, bound only after the cache has successfully primed.
+func runWithListener(ctx context.Context, listener net.Listener) error {
+	defer func() {
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	// Server-side and transport bounds, checked against the rebuild budget.
@@ -81,10 +93,52 @@ func run() error {
 	}
 
 	// Never serve an unprimed cache: anything but Installed fails startup.
-	if result, err := repo.Cache().Prime(ctx); result != surecache.Installed {
-		return fmt.Errorf("prime: %v: %w", result, err)
+	if result, primeErr := repo.Cache().Prime(ctx); result != surecache.Installed {
+		return fmt.Errorf("prime: %v: %w", result, primeErr)
 	}
 
+	if listener == nil {
+		listener, err = net.Listen("tcp", ":8080") // #nosec G102 -- This example deliberately serves HTTP on all interfaces.
+		if err != nil {
+			return err
+		}
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	srv := newHTTPServer(gctx, newHandler(repo, reg))
+	g.Go(func() error { return repo.Cache().Run(gctx) })
+	g.Go(func() error {
+		if err := srv.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	})
+	g.Go(func() error {
+		<-gctx.Done()
+		return shutdownHTTPServer(gctx, srv, 10*time.Second)
+	})
+	return g.Wait()
+}
+
+func newHTTPServer(ctx context.Context, handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+}
+
+func shutdownHTTPServer(ctx context.Context, srv *http.Server, grace time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// Shutdown leaves active connections open on timeout. Close them so
+		// network requests cannot outlive teardown (and retain pool resources).
+		return errors.Join(err, srv.Close())
+	}
+	return nil
+}
+
+func newHandler(repo groups.Repo, reg prometheus.Gatherer) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	mux.HandleFunc("GET /member/{member}", func(w http.ResponseWriter, r *http.Request) {
@@ -99,21 +153,5 @@ func run() error {
 			_ = json.NewEncoder(w).Encode(map[string]string{"group": id})
 		}
 	})
-	srv := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-
-	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return repo.Cache().Run(gctx) })
-	g.Go(func() error {
-		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
-		return nil
-	})
-	g.Go(func() error {
-		<-gctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(gctx), 10*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	})
-	return g.Wait()
+	return mux
 }

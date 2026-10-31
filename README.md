@@ -38,6 +38,37 @@ whole cache stale. Then every read defers until a fenced rebuild restores trust.
 The same story, as a PostgreSQL repository decorator, is
 [examples/groups](examples/groups). The quick start below is the in-memory version.
 
+### Other useful cases
+
+These all require a **bounded domain owned by one writer process**, not a shared
+cache for independent writers. Every write must pass through that process's cache
+mutation path, name all affected entities, and obey the store/fence contracts in
+[the design](docs/design.md). An advisory fence alone does not make multiple writer
+processes safe.
+
+- **Authorization and revocation:** one service owns a bounded set of role groups.
+  Removing a principal changes its group; moving it names both groups. Later lookups
+  must not grant from the pre-revocation state. `Defer` requires an authoritative read;
+  if that fails, deny or return unavailable, never grant from a remembered value.
+- **Routing ownership:** one controller owns a bounded assignment of workers to
+  partitions. A move invalidates both owners while it commits. A trusted negative
+  can mean "unassigned"; `Defer` cannot. If the store cannot answer, pause routing or
+  return unavailable rather than picking an owner. This is not a distributed lease
+  or a replacement for fencing work performed by downstream workers.
+- **Safety sweeps:** a single service repeatedly checks which group owns a device
+  before scheduling an action. A trusted membership or trusted negative can inform
+  the check; on `Defer`, consult the store. If it cannot answer, follow a domain-defined
+  fail-safe response: postponing a required protective action may itself be unsafe.
+  Safety actions need an independent fallback that does not depend on the store.
+  A read is not an atomic check-and-act transaction: protect actions that can race
+  later writes separately.
+
+Choose the outage policy deliberately. `ServeWhileExact` may keep answering trusted
+reads during an outage; it does not promise store reachability. If decisions must
+stop when the store is unreachable, consider `DistrustAfterProbeFailures` with a
+probe (distrust is delayed by its thresholds), or require a live store check for the
+operation. Neither policy permits bypass writes or makes `Defer` an absence.
+
 ## Guarantees
 
 In plain words (the precise statements are in [docs/design.md](docs/design.md), section 3.1):
@@ -82,7 +113,125 @@ go get github.com/nobelk/surecache/promobs@latest
 
 Requires Go 1.25 or later. The core module depends only on the standard library.
 
+## Build and test from Git
+
+Install Go **1.25+**, Git and Make. Docker Compose is needed only for the local
+PostgreSQL workflow below; optional developer tools are installed separately.
+
+```sh
+git clone https://github.com/nobelk/surecache.git
+cd surecache
+# go.work includes four modules; root ./... alone does not traverse them.
+for m in . surecachepg promobs examples/groups; do
+  (cd "$m" && go build ./...) || exit 1
+done
+# Unit tests (plus any integration tests enabled by your environment):
+for m in . surecachepg promobs examples/groups; do
+  (cd "$m" && go test -timeout 180s ./...) || exit 1
+done
+make test    # all four modules, -race -shuffle=on (requires race/CGO toolchain)
+make alloc   # allocation assertions without -race; they skip under -race
+```
+
+PostgreSQL integration tests in `surecachepg` and `examples/groups` **skip when
+`SURECACHE_PG_DSN` is unset**. A passing unit/race run without that variable does not
+validate PostgreSQL behavior. Root tests include a compile check of the quickstart
+against the in-memory store in `example_test.go`, with no third-party dependencies.
+
+### PostgreSQL integration tests
+
+From the repository root, using Docker Compose's disposable PostgreSQL 18 instance
+on `127.0.0.1:55432`:
+
+```sh
+docker compose up -d --wait
+export SURECACHE_PG_DSN='postgres://surecache:surecache@localhost:55432/postgres?sslmode=disable'
+(cd surecachepg && go test -race -count=1 -timeout 180s ./...)
+(cd examples/groups && go test -race -count=1 -timeout 180s ./...)
+# Or: make pgtest (starts Compose and supplies its default DSN).
+# For another server: make pgtest PG_DSN='postgres://...'
+docker compose down
+```
+
+Tests create and drop isolated databases; the DSN user needs permission to do both
+(`CREATEDB`). `make pgtest` leaves Compose running: shut it down yourself. The local
+Compose data directory is tmpfs, so its data is disposable, not durable storage.
+
+### Run the groups HTTP example
+
+The command does **not** create tables or seed data. With no other example instance
+running, initialize a fresh local database first. This schema matches `groups.Schema`
+in [examples/groups/store.go](examples/groups/store.go):
+
+```sh
+docker compose up -d --wait
+docker compose exec -T postgres psql -U surecache -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+CREATE TABLE groups (
+  id text PRIMARY KEY,
+  name text NOT NULL
+);
+CREATE TABLE members (
+  member text PRIMARY KEY,
+  group_id text NOT NULL REFERENCES groups (id) ON DELETE CASCADE
+);
+INSERT INTO groups (id, name) VALUES ('red', 'Red'), ('blue', 'Blue');
+INSERT INTO members (member, group_id) VALUES ('ann', 'red');
+SQL
+# Build a binary so Ctrl-C signals the service directly.
+(cd examples/groups && go build -o /tmp/surecache-groups ./cmd/groups)
+DATABASE_URL='postgres://surecache:surecache@localhost:55432/postgres?sslmode=disable' /tmp/surecache-groups
+```
+
+Leave the service in the foreground. In another terminal:
+
+```sh
+curl --fail-with-body http://localhost:8080/member/ann  # {"group":"red"}
+curl -i http://localhost:8080/member/nobody           # 404
+curl --fail-with-body http://localhost:8080/metrics
+```
+
+`DATABASE_URL` configures the service; `SURECACHE_PG_DSN` configures tests. The server
+listens on `:8080` and exposes only member reads and metrics, not HTTP write endpoints.
+The repository decorator demonstrates writes through `Mutate`/`Create`.
+
+Stop the service with **Ctrl-C** (SIGINT; SIGTERM also triggers graceful shutdown),
+then run `docker compose down` from the repository root and remove
+`/tmp/surecache-groups` if desired. Stop the service before any SQL edits or reseeding,
+then restart it so `Prime` reloads the store. The schema commands above are for a fresh
+database, not an idempotent migration. Never run overlapping writer instances.
+
+### Optional developer checks
+
+```sh
+make tools                 # pinned tools into ./bin; see Makefile for versions
+make lint                  # all four modules; needs golangci-lint
+make deps-check            # root module must have no external dependencies
+make cover                 # root-only race coverage + configured covercheck gate
+make cover-all             # report every module; set SURECACHE_PG_DSN for DB coverage
+make bench                 # root benchmarks, -benchmem, 10 repetitions
+make fuzz FUZZTIME=10s      # each of the two root fuzz targets, no -race
+make model MODEL_BUDGET=2s MODEL_SEEDS=5  # root model checks with -race
+make mutate                # root mutation testing; needs gremlins
+make vuln                  # all four modules; needs govulncheck
+```
+
+Allocation checks are separate from race tests. `make cover` checks the thresholds
+configured in `Makefile`; it does not measure all four modules. `make cover-all` writes
+`coverage.out` in each module and reports coverage across that module, including its
+internal helpers and commands. Run it with `SURECACHE_PG_DSN` set for a complete
+PostgreSQL report. CI also enforces at least 90% coverage on the public `surecachepg`
+package (excluding internal test helpers). See [the coverage report](docs/test-coverage.md)
+for measured results and remaining gaps. Fuzz/model/mutation
+runs can be expensive; raise their budgets deliberately. Tool releases may require a
+newer Go toolchain than the library's minimum. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for contributor gates.
+
 ## Quick start
+
+This is a function body taking `ctx context.Context` and the in-memory `store` from
+[example_test.go](example_test.go), with that file's imports (`context`, `errors`,
+`fmt`, `slices`, `strings`, and `surecache`). The store's `GroupOf` returns **two**
+values, `(string, bool)`; real repository reads must also propagate store errors.
 
 ```go
 // A Source reads the authoritative store: LoadOne, NotFound and a fenced LoadAll.
@@ -106,26 +255,40 @@ if err != nil {
 
 // Never serve an unprimed cache: anything but Installed fails startup.
 if r, err := cache.Prime(ctx); r != surecache.Installed {
-	return fmt.Errorf("prime: %v: %w", r, err)
+	return fmt.Errorf("prime: %v: %v", r, err)
 }
-go func() { _ = cache.Run(ctx) }() // the single background rebuilder
+ctx, cancel := context.WithCancel(ctx)
+done := make(chan error, 1)
+go func() { done <- cache.Run(ctx) }() // the single background rebuilder
+defer func() { cancel(); <-done }() // join it when this function returns
 
-// Found may drive the action. Anything else asks the store; it is not "no such group".
-if g, a := cache.Get("red"); a == surecache.Found {
-	fmt.Println("red:", g.Members)
+// Primary-key misses defer: ask the store, never infer absence from the cache.
+g, a := cache.Get("red")
+if a != surecache.Found {
+	g, err = store.LoadOne(ctx, "red")
+	if err != nil {
+		return err // includes not-found; this example expects red to exist
+	}
 }
+fmt.Println("red:", g.Members)
 
 // Writes: name every entity the write can change.
-err = cache.Mutate(ctx, []string{"blue"}, func() error { return store.AddMember("blue", "bob") })
+if err := cache.Mutate(ctx, []string{"blue"}, func() error { return store.AddMember("blue", "bob") }); err != nil {
+	return err
+}
 
 // Absent is authoritative ("bob is in no group"). Defer asks the store, always.
 id, a, err := surecache.Lookup(cache, byMember, "bob")
+var ok bool
 switch {
 case err != nil || a == surecache.Defer:
-	id, _, err = store.GroupOf("bob") // ask the store; never treat Defer as absent
+	id, ok = store.GroupOf("bob") // two results; never treat Defer as absent
 case a == surecache.Absent:
-	// trusted negative: do not act as if bob were in a group
+	ok = false // trusted negative: do not act as if bob were in a group
 default:
+	ok = true
+}
+if ok {
 	fmt.Println("bob is in:", id)
 }
 ```
@@ -133,7 +296,12 @@ default:
 The runnable versions are `Example` and `ExampleLookup` in
 [example_test.go](example_test.go). For a PostgreSQL service with a cached repository
 decorator, Prometheus metrics and graceful shutdown, see
-[examples/groups](examples/groups).
+[examples/groups](examples/groups). Run the in-memory examples and the README compile
+regression without PostgreSQL:
+
+```sh
+go test -run '^(Example|ExampleLookup|ExampleCache_Mutate|ExampleCache_Prime|TestREADMEQuickstartCompiles)$' -count=1 -timeout 90s .
+```
 
 ## Documentation
 

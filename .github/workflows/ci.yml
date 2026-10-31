@@ -95,8 +95,8 @@ jobs:
       - name: Test surecachepg and the PostgreSQL example
         run: |
           status=0
-          (cd surecachepg && go test -race -json ./...) > test.json || status=1
-          (cd examples/groups && go test -race -json ./...) >> test.json || status=1
+          (cd surecachepg && go test -race -timeout 180s -json -coverpkg=./... -coverprofile=coverage.out ./...) > test.json || status=1
+          (cd examples/groups && go test -race -timeout 180s -json -coverpkg=./... -coverprofile=coverage.out ./...) >> test.json || status=1
           jq -j 'select(.Action == "output") | .Output' test.json
           exit "$status"
       - name: Fail on skipped tests
@@ -107,6 +107,17 @@ jobs:
             echo "$skipped"
             exit 1
           fi
+
+      - name: PostgreSQL adapter coverage gate and example report
+        run: |
+          go run ./scripts/covercheck -profile surecachepg/coverage.out -module github.com/nobelk/surecache/surecachepg -exclude internal/ -min 90
+          go tool cover -func=examples/groups/coverage.out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: postgres-${{ matrix.postgres }}-coverage
+          path: |
+            surecachepg/coverage.out
+            examples/groups/coverage.out
 
   vuln:
     runs-on: ubuntu-latest

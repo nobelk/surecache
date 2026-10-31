@@ -19,7 +19,7 @@ import (
 func TestReadSnapshot_RowsHideConnection(t *testing.T) {
 	underlying := &snapshotTestRows{conn: new(pgx.Conn)}
 	tx := &snapshotTestTx{rows: underlying}
-	err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+	err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
 		func(q surecachepg.SnapshotQuerier) error {
 			rows, err := q.Query(context.Background(), "SELECT 1")
 			if err != nil {
@@ -41,7 +41,7 @@ func TestReadSnapshot_RowsCompatibility(t *testing.T) {
 	readErr := errors.New("read failed")
 	underlying := &snapshotTestRows{readErr: readErr, typeMap: pgtype.NewMap()}
 	tx := &snapshotTestTx{rows: underlying}
-	err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+	err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
 		func(q surecachepg.SnapshotQuerier) error {
 			rows, err := q.Query(context.Background(), "SELECT 7")
 			if err != nil {
@@ -74,10 +74,10 @@ func TestReadSnapshot_RowsCompatibility(t *testing.T) {
 			if rows.CommandTag().String() != "SELECT 1" || rows.Err() != readErr {
 				t.Fatal("CommandTag or Err changed")
 			}
-			return nil
+			return rows.Err()
 		})
-	if err != nil {
-		t.Fatal(err)
+	if err != readErr {
+		t.Fatalf("ReadSnapshot = %v, want %v", err, readErr)
 	}
 }
 
@@ -87,7 +87,7 @@ func TestReadSnapshot_QueryErrorsAndLimit(t *testing.T) {
 	tx := &snapshotTestTx{err: queryErr, rows: &snapshotTestRows{readErr: queryErr, conn: new(pgx.Conn)}}
 	b := surecachepg.DefaultBounds()
 	b.MaxReadStatements = 1
-	err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), b,
+	err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), b,
 		func(q surecachepg.SnapshotQuerier) error {
 			rows, err := q.Query(context.Background(), "SELECT 1")
 			if rows == nil || err != queryErr {
@@ -103,9 +103,9 @@ func TestReadSnapshot_QueryErrorsAndLimit(t *testing.T) {
 			if err := q.QueryRow(context.Background(), "SELECT 3").Scan(new(int)); err != surecachepg.ErrStatementLimit {
 				t.Fatalf("QueryRow past limit = %v", err)
 			}
-			return nil
+			return queryErr
 		})
-	if err != nil || tx.calls != 1 {
+	if err != queryErr || tx.calls != 1 {
 		t.Fatalf("ReadSnapshot = %v; query calls = %d", err, tx.calls)
 	}
 }
@@ -114,7 +114,7 @@ func TestReadSnapshot_QueryErrorsAndLimit(t *testing.T) {
 func TestReadSnapshot_RowHidesConnection(t *testing.T) {
 	underlying := &snapshotTestRows{conn: new(pgx.Conn)}
 	tx := &snapshotTestTx{row: underlying}
-	err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+	err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
 		func(q surecachepg.SnapshotQuerier) error {
 			row := q.QueryRow(context.Background(), "SELECT 7")
 			if _, ok := row.(interface{ Conn() *pgx.Conn }); ok {
@@ -138,7 +138,7 @@ func TestReadSnapshot_ScannerHidesConnection(t *testing.T) {
 		t.Run(map[bool]string{false: "Query", true: "QueryRow"}[single], func(t *testing.T) {
 			underlying := &snapshotTestRows{conn: new(pgx.Conn)}
 			tx := &snapshotTestTx{rows: underlying, row: underlying}
-			err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+			err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
 				func(q surecachepg.SnapshotQuerier) error {
 					scanner := &snapshotTestScanner{t: t}
 					if single {
@@ -197,7 +197,7 @@ func TestReadSnapshot_QueryRewriterRejected(t *testing.T) {
 		for _, formats := range []bool{false, true} {
 			t.Run(map[bool]string{false: "Query", true: "QueryRow"}[single]+map[bool]string{false: "", true: "/formats"}[formats], func(t *testing.T) {
 				tx := &snapshotTestTx{rows: &snapshotTestRows{}, row: &snapshotTestRows{}}
-				err := surecachepg.ReadSnapshot(context.Background(), snapshotTestDB{tx}, surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+				err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
 					func(q surecachepg.SnapshotQuerier) error {
 						args := []any{snapshotTestRewriter{}}
 						if formats {
@@ -256,35 +256,107 @@ func assertSnapshotResultOpaque(t *testing.T, result any) {
 	}
 }
 
-type snapshotTestDB struct{ tx pgx.Tx }
+// The exclusive fence and snapshot read have independent transaction lifetimes.
+type snapshotTestDB struct {
+	fence, read *snapshotTestTx
+	begins      int
+}
 
-func (db snapshotTestDB) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
-	return db.tx, nil
+func newSnapshotTestDB(read *snapshotTestTx) *snapshotTestDB {
+	return &snapshotTestDB{fence: &snapshotTestTx{}, read: read}
+}
+
+func (db *snapshotTestDB) BeginTx(_ context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	switch db.begins {
+	case 0:
+		db.begins++
+		return db.fence, nil
+	case 1:
+		if !db.fence.committed {
+			return nil, errors.New("read began before exclusive fence committed")
+		}
+		if opts.IsoLevel != pgx.RepeatableRead || opts.AccessMode != pgx.ReadOnly {
+			return nil, errors.New("read transaction must be repeatable read, read only")
+		}
+		db.begins++
+		return db.read, nil
+	default:
+		return nil, errors.New("unexpected extra transaction")
+	}
 }
 
 type snapshotTestTx struct {
-	pgx.Tx // Unused transaction operations panic rather than silently succeeding.
-	rows   pgx.Rows
-	row    pgx.Row
-	err    error
-	calls  int
+	pgx.Tx    // Unused transaction operations panic rather than silently succeeding.
+	rows      pgx.Rows
+	row       pgx.Row
+	err       error // Simulated server query failure, which aborts the transaction.
+	calls     int
+	closed    bool
+	aborted   bool
+	committed bool
 }
 
-func (*snapshotTestTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
+func (tx *snapshotTestTx) stateErr() error {
+	if tx.closed {
+		return pgx.ErrTxClosed
+	}
+	if tx.aborted {
+		return &pgconn.PgError{Code: "25P02", Message: "current transaction is aborted"}
+	}
+	return nil
 }
-func (*snapshotTestTx) Commit(context.Context) error   { return nil }
-func (*snapshotTestTx) Rollback(context.Context) error { return nil }
+
+func (tx *snapshotTestTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, tx.stateErr()
+}
+
+func (tx *snapshotTestTx) Commit(context.Context) error {
+	if tx.closed {
+		return pgx.ErrTxClosed
+	}
+	tx.closed = true
+	if tx.aborted {
+		return pgx.ErrTxCommitRollback
+	}
+	tx.committed = true
+	return nil
+}
+
+func (tx *snapshotTestTx) Rollback(context.Context) error {
+	if tx.closed {
+		return pgx.ErrTxClosed
+	}
+	tx.closed = true
+	return nil
+}
+
 func (tx *snapshotTestTx) Query(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+	if err := tx.stateErr(); err != nil {
+		return nil, err
+	}
 	tx.calls++
 	if len(args) == 0 || args[0] != pgx.QueryExecModeDescribeExec {
 		return nil, errors.New("extended protocol not forced")
 	}
+	if tx.err != nil {
+		tx.aborted = true
+	}
 	return tx.rows, tx.err
 }
 
+type snapshotTestErrorRow struct{ err error }
+
+func (r snapshotTestErrorRow) Scan(...any) error { return r.err }
+
 func (tx *snapshotTestTx) QueryRow(context.Context, string, ...any) pgx.Row {
+	if err := tx.stateErr(); err != nil {
+		return snapshotTestErrorRow{err}
+	}
 	tx.calls++
+	if tx.err != nil {
+		tx.aborted = true
+		return snapshotTestErrorRow{tx.err}
+	}
 	return tx.row
 }
 

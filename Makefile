@@ -29,7 +29,7 @@ MODEL_SEEDS  ?= 50
 # Local PostgreSQL from compose.yaml.
 PG_DSN ?= postgres://surecache:surecache@localhost:55432/postgres?sslmode=disable
 
-.PHONY: all lint test alloc cover bench mutate fuzz model pgtest vuln tools deps-check
+.PHONY: all lint test alloc cover cover-all bench mutate fuzz model pgtest vuln tools deps-check
 
 all: lint test
 
@@ -47,11 +47,23 @@ test:
 
 # Allocation tests (NFR-3) skip under -race, so they run separately without it.
 alloc:
-	go test -count=1 -run 'Allocs|ZeroAllocs|OneAlloc' -v .
+	@for m in . promobs; do \
+		echo "==> allocation tests $$m"; \
+		(cd $$m && go test -count=1 -timeout 180s -run 'Allocs|ZeroAllocs|OneAlloc' -v .) || exit 1; \
+	done
 
 cover:
 	go test -race -coverprofile=coverage.out ./...
 	go run ./scripts/covercheck -profile coverage.out -min $(COVER_MIN) -full $(COVER_FULL) $(COVER_FLAGS)
+
+# Reports every module, including integration helpers. Set SURECACHE_PG_DSN to
+# exercise PostgreSQL paths; without it those tests skip and coverage is incomplete.
+cover-all:
+	@for m in $(MODULES); do \
+		echo "==> coverage $$m"; \
+		(cd $$m && go test -race -count=1 -timeout 180s -coverpkg=./... -coverprofile=coverage.out ./... \
+			&& go tool cover -func=coverage.out) || exit 1; \
+	done
 
 bench:
 	go test -run '^$$' -bench . -benchmem -count 10 ./...
