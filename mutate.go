@@ -77,8 +77,9 @@ func (c *Cache[ID, E]) guard(ctx context.Context, ids []ID, apply func()) {
 
 	settled := false
 	defer func() {
+		panics := callbackPanics{first: recover()}
 		if h := c.hooks; h != nil && h.beforeRelease != nil {
-			h.beforeRelease(ctx, ids)
+			panics.call(func() { h.beforeRelease(ctx, ids) })
 		}
 		var buf eventBuf
 		c.mu.Lock()
@@ -92,7 +93,8 @@ func (c *Cache[ID, E]) guard(ctx context.Context, ids []ID, apply func()) {
 		}
 		c.inFlight--
 		c.mu.Unlock()
-		c.emit(&buf)
+		panics.call(func() { c.emit(&buf) })
+		panics.propagate()
 	}()
 	apply()
 	settled = true

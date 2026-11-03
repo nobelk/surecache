@@ -79,10 +79,41 @@ type SnapshotQuerier interface {
 ```
 
 Each call counts as one statement; the call past `MaxReadStatements` fails without
-reaching the server. Every call forces the extended protocol
-(`pgx.QueryExecModeDescribeExec` prepended to the arguments; unlike the cache-describe mode it works with any pool, including one whose description cache is disabled), so one call cannot carry
-several statements, and an argument that selects another exec mode is rejected. There is
-no batch or connection access.
+reaching the server. Every call prepends `pgx.QueryExecModeExec`, independent of pool
+defaults and with no dependency on either statement or description caches. This forces
+single-statement extended-protocol execution; an argument selecting any exec mode is
+rejected. There is no batch or connection access.
+
+The **single exchange** is essential to timeout accounting. `QueryExecModeDescribeExec`
+sends Parse/Describe/Sync, then Bind/Execute/Sync: the intermediate Sync ends the first
+`statement_timeout`, allowing parsing (including relation-lock waits) and execution to
+each consume a full timeout. In pgx v5.11.0, `Conn.Query` in Exec mode builds parameters
+without a statement description and calls `PgConn.ExecParams`, which sends
+Parse/Bind/Describe-portal/Execute/Sync with no intermediate Sync. `QueryRow` delegates
+to `Query`. PostgreSQL starts the timeout on the first query-related protocol message
+and cancels it on Execute or Sync completion, so this exchange gives parsing and
+execution **one shared timeout**. See PostgreSQL's
+[`statement_timeout` documentation](https://www.postgresql.org/docs/18/runtime-config-client.html#GUC-STATEMENT-TIMEOUT)
+and pgx's `conn.go`, `extended_query_builder.go`, and `pgconn/pgconn.go`. Explicitly
+prepared statement names use pgx's existing Bind/Execute exchange, also without an
+intermediate Sync. Defaults and the `ReadBound` formula remain unchanged. This is a
+server-work bound, not a wall-clock bound on callback work, client-side decoding or
+network delays; callbacks must not add unbounded work between counted calls.
+
+Compatibility: for ordinary SQL, Exec mode encodes parameters from **Go types**, without
+server-described parameter OIDs, and uses **text parameters and text results** rather
+than DescribeExec's preferred (often binary) formats. pgx result-format options do not
+override ordinary SQL's Exec path. `RawValues`/field formats and custom codec behavior
+can therefore change; custom codecs must support text. Built-in pgx-supported types
+work directly, but ambiguous types (for example `map[string]string`, which might mean
+JSON or hstore) and custom parameter types may require `TypeMap().RegisterDefaultPgType`
+and the corresponding codec/type registration on **every pooled connection**, usually
+in `pgxpool.Config.AfterConnect`. SQL casts resolve server-side inference but do not
+replace any required Go-type encoding registration. Custom values should implement the
+appropriate pgtype valuer interface; relying on `fmt.Stringer` can produce text unlike
+the previous binary value. Explicitly prepared statement names retain pgx's described
+encoding behavior. Do not switch back to DescribeExec to solve an encoding issue: that
+would invalidate timeout accounting.
 
 PostgreSQL 17's `transaction_timeout` was considered as the aggregate bound and rejected
 for v0.1: it terminates the whole session rather than cancelling the statement, and it
@@ -176,6 +207,14 @@ with `KeepAliveConfig` (Go 1.23+). It changes only the config; the caller owns t
    server. `TestReadSnapshot_MultiStatementRejected`: `"SELECT 1; SELECT 2"` in one
    `Query` fails. `TestReadSnapshot_ExecModeOverrideRejected`: passing
    `pgx.QueryExecModeSimpleProtocol` as an argument fails.
+   `TestReadSnapshot_SingleExchangeProtocol` enforces Exec mode and unchanged parameters
+   at the transaction seam for both Query and QueryRow.
+   `TestReadSnapshot_TimeoutCoversParseAndExecute` observes a relation-lock wait in
+   `pg_stat_activity`, delays release, observes slow execution, then requires PostgreSQL
+   SQLSTATE `57014`: neither phase alone exceeds the configured timeout, but together
+   they do. It covers both APIs with normal and disabled caches (and a simple-protocol
+   pool default), using bounded contexts and joined goroutines, not exact elapsed-time
+   assertions.
 4. `groupstore` and its harness. Run `surecachetest.Run` against it. Every subtest passes,
    none skipped (CI enforces no skips).
 5. Error classification: a unique violation inside a rolled-back tx is nothing-committed;

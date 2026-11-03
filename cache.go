@@ -84,11 +84,13 @@ func (c *Cache[ID, E]) withWriteLock(ctx context.Context, fn func(buf *eventBuf)
 	c.mu.Lock()
 	done := false
 	defer func() {
+		panics := callbackPanics{first: recover()}
 		if !done {
 			c.markStaleLocked(ctx, errPanicked)
 		}
 		c.mu.Unlock()
-		c.emit(&buf)
+		panics.call(func() { c.emit(&buf) })
+		panics.propagate()
 	}()
 	fn(&buf)
 	done = true

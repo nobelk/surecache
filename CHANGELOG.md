@@ -19,6 +19,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). T
 
 ### Fixed
 
+- Use one PostgreSQL extended-protocol exchange per snapshot query, so parse/lock
+  waits and execution share one statement timeout instead of each receiving a full
+  timeout. Snapshot queries now use pgx Exec-mode text encoding; custom types may
+  need per-connection codec/default-type registration.
+- Contain observer/logger panics across complete background probe/rebuild iterations,
+  including secondary failure-reporting panics. Attempt independent consumers and
+  remaining events in order before propagating the first panic to foreground callers.
 - Run `promobs` allocation assertions alongside core assertions in `make alloc`.
 - Cancel active example HTTP requests when the service stops and force-close their
   connections if the graceful-shutdown budget expires.

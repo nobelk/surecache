@@ -19,6 +19,11 @@ import (
 // A callback may call the cache's read methods (Get, Lookup, List). It must not call
 // Mutate, Create, Prime or Run, which deliver state events themselves and would deadlock.
 //
+// Each event is attempted once. If a callback or logger panics, the cache still
+// attempts the remaining consumers and queued events in order, without retrying the
+// failing consumer. Foreground calls then propagate the first panic unchanged;
+// background iterations contain it, mark stale, and continue on the next tick.
+//
 // Implementations must embed NopObserver, so that methods added in later versions do not
 // break them.
 type Observer interface {
@@ -214,13 +219,15 @@ func (c *Cache[ID, E]) queueStateLocked(ev stateEvent) {
 // emit delivers buffered counter events, then drains the state queue. The caller must not
 // hold c.mu.
 func (c *Cache[ID, E]) emit(buf *eventBuf) {
+	var panics callbackPanics
 	for i := range buf.n {
-		c.deliverCounter(buf.fixed[i])
+		panics.call(func() { c.deliverCounter(buf.fixed[i]) })
 	}
 	for _, ev := range buf.extra {
-		c.deliverCounter(ev)
+		panics.call(func() { c.deliverCounter(ev) })
 	}
-	c.drain()
+	panics.call(c.drain)
+	panics.propagate()
 }
 
 func (c *Cache[ID, E]) deliverCounter(ev counterEvent) {
@@ -243,28 +250,54 @@ func (c *Cache[ID, E]) drain() {
 	}
 	c.emitMu.Lock()
 	defer c.emitMu.Unlock()
+	var panics callbackPanics
 	for {
 		c.mu.Lock()
 		batch := c.stateQueue
 		c.stateQueue = nil
 		c.mu.Unlock()
 		if len(batch) == 0 {
-			return
+			break
 		}
 		for _, ev := range batch {
-			c.deliverState(ev)
+			panics.call(func() { c.deliverState(ev) })
 		}
 	}
+	panics.propagate()
 }
 
 func (c *Cache[ID, E]) deliverState(ev stateEvent) {
-	c.logState(ev)
-	switch ev.kind {
-	case stateStale:
-		c.cfg.observer.StaleChanged(ev.on, ev.cause)
-	case stateUnhealthy:
-		c.cfg.observer.UnhealthyChanged(ev.on)
-	case stateEntities:
-		c.cfg.observer.Entities(ev.n)
+	var panics callbackPanics
+	panics.call(func() { c.logState(ev) })
+	panics.call(func() {
+		switch ev.kind {
+		case stateStale:
+			c.cfg.observer.StaleChanged(ev.on, ev.cause)
+		case stateUnhealthy:
+			c.cfg.observer.UnhealthyChanged(ev.on)
+		case stateEntities:
+			c.cfg.observer.Entities(ev.n)
+		}
+	})
+	panics.propagate()
+}
+
+// callbackPanics lets independent event consumers run even when an earlier one
+// panics. It preserves the first panic for foreground callers; background recovery
+// deliberately does not propagate secondary reporting failures.
+type callbackPanics struct{ first any }
+
+func (p *callbackPanics) call(fn func()) {
+	defer func() {
+		if value := recover(); value != nil && p.first == nil {
+			p.first = value
+		}
+	}()
+	fn()
+}
+
+func (p *callbackPanics) propagate() {
+	if p.first != nil {
+		panic(p.first)
 	}
 }

@@ -38,7 +38,11 @@ func (c *Cache[ID, E]) Prime(ctx context.Context) (RebuildResult, error) {
 // also when a callback panics.
 func (c *Cache[ID, E]) rebuild(ctx context.Context, captured uint64, trigger Trigger) (RebuildResult, error) {
 	result := Failed
-	defer func() { c.cfg.observer.Rebuild(trigger, result) }()
+	defer func() {
+		panics := callbackPanics{first: recover()}
+		panics.call(func() { c.cfg.observer.Rebuild(trigger, result) })
+		panics.propagate()
+	}()
 	all, err := c.src.LoadAll(ctx)
 	if h := c.hooks; h != nil && h.afterLoadAll != nil {
 		h.afterLoadAll()

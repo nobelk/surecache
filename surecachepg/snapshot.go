@@ -29,6 +29,18 @@ var ErrQueryRewriter = errors.New("surecachepg: snapshot reads do not allow quer
 // each statement, so the read bound holds only if every statement is counted.
 // Query preserves pgx.Rows compatibility, but its Conn method always returns nil.
 // Query rewriters (including pgx.NamedArgs) are rejected; use positional parameters.
+//
+// Calls force pgx.QueryExecModeExec, independent of pool defaults and caches: one
+// extended-protocol exchange keeps statement_timeout running across Parse lock
+// waits and execution. For SQL (rather than an explicitly prepared statement name),
+// pgx encodes parameters and returns results in text format; result-format options
+// do not override that mode. Parameters are encoded from their Go types, without a
+// server description. Ambiguous or custom parameter types may need codecs and
+// RegisterDefaultPgType mappings installed on every connection's TypeMap (for
+// example in pgxpool.Config.AfterConnect). Custom codecs must support text, and
+// custom value types should implement the appropriate pgtype valuer interfaces;
+// encoding can differ from DescribeExec's binary encoding. Prefer explicit SQL
+// casts where PostgreSQL cannot infer a parameter's type.
 type SnapshotQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -79,7 +91,10 @@ func (q *querier) take(args []any) ([]any, error) {
 		return nil, ErrStatementLimit
 	}
 	q.left--
-	return append([]any{pgx.QueryExecModeDescribeExec}, args...), nil
+	// DescribeExec inserts a Sync between description and execution, resetting
+	// statement_timeout. Exec keeps Parse/Bind/Execute in one exchange, so the
+	// server timeout covers parsing (including lock waits) and execution together.
+	return append([]any{pgx.QueryExecModeExec}, args...), nil
 }
 
 func (q *querier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {

@@ -115,10 +115,22 @@ func (c *Cache[ID, E]) startProber(ctx context.Context, wg *sync.WaitGroup) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.recordHealth(ctx, hp, c.probe(ctx, hp))
+				c.probeTick(ctx, hp)
 			}
 		}
 	})
+}
+
+// probeTick contains the entire iteration, including observer delivery after the
+// probe and any secondary failure-reporting panic. The next scheduled probe still
+// runs, independently of the rebuilder.
+func (c *Cache[ID, E]) probeTick(ctx context.Context, hp *HealthPolicy) {
+	defer func() {
+		if value := recover(); value != nil {
+			_ = c.backgroundPanic(ctx, value)
+		}
+	}()
+	c.recordHealth(ctx, hp, c.probe(ctx, hp))
 }
 
 // probeOutcome classifies one probe.

@@ -79,7 +79,7 @@ func TestSnapshotTestTx_Lifecycle(t *testing.T) {
 			if _, err := tx.Exec(ctx, "SELECT 1"); err != pgx.ErrTxClosed {
 				t.Fatalf("Exec after %s = %v", finish, err)
 			}
-			if rows, err := tx.Query(ctx, "SELECT 1", pgx.QueryExecModeDescribeExec); rows != nil || err != pgx.ErrTxClosed {
+			if rows, err := tx.Query(ctx, "SELECT 1", pgx.QueryExecModeExec); rows != nil || err != pgx.ErrTxClosed {
 				t.Fatalf("Query after %s = %v, %v", finish, rows, err)
 			}
 			if err := tx.QueryRow(ctx, "SELECT 1").Scan(new(int)); err != pgx.ErrTxClosed {
@@ -106,10 +106,10 @@ func TestSnapshotTestTx_QueryAbort(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tx := &snapshotTestTx{err: queryErr}
 			if single {
-				if err := tx.QueryRow(ctx, "SELECT 1").Scan(new(int)); err != queryErr {
+				if err := tx.QueryRow(ctx, "SELECT 1", pgx.QueryExecModeExec).Scan(new(int)); err != queryErr {
 					t.Fatalf("QueryRow = %v", err)
 				}
-			} else if _, err := tx.Query(ctx, "SELECT 1", pgx.QueryExecModeDescribeExec); err != queryErr {
+			} else if _, err := tx.Query(ctx, "SELECT 1", pgx.QueryExecModeExec); err != queryErr {
 				t.Fatalf("Query = %v", err)
 			}
 			assertAborted := func(err error) {
@@ -121,7 +121,7 @@ func TestSnapshotTestTx_QueryAbort(t *testing.T) {
 			}
 			_, err := tx.Exec(ctx, "SELECT 2")
 			assertAborted(err)
-			_, err = tx.Query(ctx, "SELECT 2", pgx.QueryExecModeDescribeExec)
+			_, err = tx.Query(ctx, "SELECT 2", pgx.QueryExecModeExec)
 			assertAborted(err)
 			assertAborted(tx.QueryRow(ctx, "SELECT 2").Scan(new(int)))
 			if err := tx.Commit(ctx); err != pgx.ErrTxCommitRollback {
