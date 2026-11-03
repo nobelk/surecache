@@ -60,6 +60,15 @@ cache name and the cause, never entity contents.
 | `surecache_rebuild_failed` | Error | The first failed loop rebuild of a stale episode. | Check the cause: store down, fence wait timeout, capacity, contract violation. |
 | `surecache_recovered` | Info | A rebuild ended the stale episode (`attempts`, `stale_for`). | None. |
 
+Observers and log handlers must be concurrency-safe and nonblocking. The background
+rebuilder/prober contains their panics, marks the cache stale, and continues on its next
+schedule, even if reporting the failure also panics. Each consumer is attempted once:
+a failing logger does not prevent observer delivery, nor does one failing event discard
+later queued state events. Failed consumers are not retried; foreground operations
+propagate the first consumer panic after attempting remaining events. Fix a repeatedly
+panicking consumer rather than relying on metric/log completeness from that consumer.
+Panic containment cannot interrupt a callback that blocks indefinitely.
+
 A `cause` of `surecache: store contract violation` or `surecache: index key held by
 another entity` means the store broke a precondition (PRE-2, PRE-3 or PRE-4): find the
 write that bypassed or misclassified the mutation path.
@@ -94,7 +103,10 @@ bounds. With `surecachepg`:
 - `ConfigurePool` sets `idle_in_transaction_session_timeout`, so an abandoned
   transaction cannot hold the mutation fence forever, and installs TCP keepalive.
 - The exclusive fence runs with `lock_timeout` and `statement_timeout`; the snapshot read
-  with `statement_timeout` per statement and a statement count limit.
+  with `statement_timeout` per statement and a statement count limit. Snapshot queries
+  force pgx's single-exchange Exec mode so parsing/lock waits and execution share one
+  timeout. Parameters/results use text encoding; custom types may need per-connection
+  codec/default-type registration (see `SnapshotQuerier` documentation).
 - Call `surecachepg.CheckBudgets(bounds, rebuildBudget)` at startup: the fence wait plus
   the read bound must be less than the rebuild budget.
 

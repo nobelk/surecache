@@ -15,6 +15,33 @@ import (
 	"github.com/nobelk/surecache/surecachepg"
 )
 
+// Clarification 13: one timeout must cover parsing and execution, for both APIs.
+// This mode needs neither a statement cache nor a description cache.
+func TestReadSnapshot_SingleExchangeProtocol(t *testing.T) {
+	for _, single := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Query", true: "QueryRow"}[single], func(t *testing.T) {
+			tx := &snapshotTestTx{rows: &snapshotTestRows{}, row: &snapshotTestRows{}}
+			err := surecachepg.ReadSnapshot(context.Background(), newSnapshotTestDB(tx), surecachepg.NewFence(77), surecachepg.DefaultBounds(),
+				func(q surecachepg.SnapshotQuerier) error {
+					if single {
+						return q.QueryRow(context.Background(), "SELECT $1::int", 7).Scan(new(int))
+					}
+					rows, err := q.Query(context.Background(), "SELECT $1::int", 7)
+					if rows != nil {
+						rows.Close()
+					}
+					return err
+				})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(tx.args, []any{pgx.QueryExecModeExec, 7}) {
+				t.Fatalf("query arguments = %v; want single-exchange Exec mode and unchanged parameter", tx.args)
+			}
+		})
+	}
+}
+
 // Clarification 13: query results must not bypass the counted snapshot interface.
 func TestReadSnapshot_RowsHideConnection(t *testing.T) {
 	underlying := &snapshotTestRows{conn: new(pgx.Conn)}
@@ -291,6 +318,7 @@ type snapshotTestTx struct {
 	row       pgx.Row
 	err       error // Simulated server query failure, which aborts the transaction.
 	calls     int
+	args      []any
 	closed    bool
 	aborted   bool
 	committed bool
@@ -335,8 +363,9 @@ func (tx *snapshotTestTx) Query(_ context.Context, _ string, args ...any) (pgx.R
 		return nil, err
 	}
 	tx.calls++
-	if len(args) == 0 || args[0] != pgx.QueryExecModeDescribeExec {
-		return nil, errors.New("extended protocol not forced")
+	tx.args = args
+	if len(args) == 0 || args[0] != pgx.QueryExecModeExec {
+		return nil, errors.New("single-exchange extended protocol not forced")
 	}
 	if tx.err != nil {
 		tx.aborted = true
@@ -348,11 +377,15 @@ type snapshotTestErrorRow struct{ err error }
 
 func (r snapshotTestErrorRow) Scan(...any) error { return r.err }
 
-func (tx *snapshotTestTx) QueryRow(context.Context, string, ...any) pgx.Row {
+func (tx *snapshotTestTx) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
 	if err := tx.stateErr(); err != nil {
 		return snapshotTestErrorRow{err}
 	}
 	tx.calls++
+	tx.args = args
+	if len(args) == 0 || args[0] != pgx.QueryExecModeExec {
+		return snapshotTestErrorRow{errors.New("single-exchange extended protocol not forced")}
+	}
 	if tx.err != nil {
 		tx.aborted = true
 		return snapshotTestErrorRow{tx.err}

@@ -16,7 +16,8 @@ import (
 //
 // Run returns ErrNotPrimed unless an earlier Prime returned Installed, and
 // ErrAlreadyRunning while another Run is active. A panic in the store or in a Spec
-// callback does not escape Run: the cache is marked stale and the next tick retries.
+// callback, observer or logger does not escape Run: the cache is marked stale and
+// the next tick retries. Failure reporting is best-effort if a consumer also panics.
 func (c *Cache[ID, E]) Run(ctx context.Context) error {
 	c.mu.Lock()
 	switch {
@@ -61,11 +62,11 @@ func (c *Cache[ID, E]) tick(ctx context.Context) {
 	result, err := Failed, error(nil)
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%w: %v", errPanicked, r)
-			c.markStale(tickCtx, err)
+			err = c.backgroundPanic(tickCtx, r)
 		}
 		if rebuilding && result == Failed {
-			c.noteLoopFailure(tickCtx, err)
+			var reporting callbackPanics
+			reporting.call(func() { c.noteLoopFailure(tickCtx, err) })
 		}
 	}()
 	tickCtx = c.cfg.tickContext(ctx)
@@ -84,4 +85,13 @@ func (c *Cache[ID, E]) tick(ctx context.Context) {
 	defer cancel()
 	rebuilding = true
 	result, err = c.rebuild(rctx, captured, TriggerLoop)
+}
+
+// backgroundPanic distrusts the snapshot before attempting failure reports. A
+// secondary logger/observer panic must not escape the recovering background task.
+func (c *Cache[ID, E]) backgroundPanic(ctx context.Context, value any) error {
+	cause := fmt.Errorf("%w: %v", errPanicked, value)
+	var reporting callbackPanics
+	reporting.call(func() { c.markStale(ctx, cause) })
+	return cause
 }

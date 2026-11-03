@@ -109,13 +109,21 @@ These refine the design document. Where they conflict with it, this list wins.
     `surecachepg/internal/groupstore`.
 12. **Ordered state events and initial state.** State events (`StaleChanged`,
     `UnhealthyChanged`, `Entities`) and their logs are queued under the lock and drained
-    in order under a separate emitter mutex. Off-lock delivery therefore never reorders
-    or drops a transition. Observer callbacks may call read methods but not `Mutate`,
+    in order under a separate emitter mutex. Each log and observer consumer is attempted
+    once in transition order, even when another consumer panics; failed consumers are
+    not retried, because they may already have applied side effects. Foreground calls
+    propagate the first consumer panic after attempting remaining events. Background
+    rebuild/probe iterations contain consumer panics, mark stale, and continue; secondary
+    failure-reporting panics are contained too. Observer callbacks may call read methods but not `Mutate`,
     `Create`, `Prime` or `Run`. `Build` publishes the initial stale state (milestone 02).
 13. **PostgreSQL read bound.** `statement_timeout` bounds each statement, not the
     snapshot transaction. `surecachepg` bounds the read as `ReadStatementTimeout ×
     MaxReadStatements`, and the snapshot callback gets a restricted, counted,
-    single-statement query interface instead of a `pgx.Tx` (milestone 09).
+    single-statement query interface instead of a `pgx.Tx` (milestone 09). Calls force
+    `pgx.QueryExecModeExec`: Parse/Bind/Execute share one protocol exchange and one
+    server timeout. `DescribeExec` is not allowed, because its intermediate Sync lets
+    parsing and execution each consume a fresh timeout. Exec's text encoding and
+    custom-type registration requirements are documented on `SnapshotQuerier`.
 14. **A refresh batch holds its ids pending.** Found by the model checker in milestone
     07. A refresh that a newer same-entity window discards leaves the entity to the
     newer batch, and its mutation then releases its marks. Section 6.3 assumed the

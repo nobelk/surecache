@@ -30,9 +30,11 @@ func (c *Cache[ID, E]) refreshBatch(ctx context.Context, ids []ID) {
 	// Register before opening windows: withWriteLock emits queued events on its
 	// way out, and an observer panic must not strand batch-owned marks.
 	defer func() {
+		panics := callbackPanics{first: recover()}
 		if opened {
-			c.endRefresh(ctx, ids, completed)
+			panics.call(func() { c.endRefresh(ctx, ids, completed) })
 		}
+		panics.propagate()
 	}()
 	c.withWriteLock(ctx, func(*eventBuf) {
 		c.generation++
